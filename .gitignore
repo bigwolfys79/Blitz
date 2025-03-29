@@ -1,0 +1,7 @@
+.vscode/
+.venv/
+comparison.log
+models/best_lstm_model.keras
+models/lstm_model.keras
+script.log
+results.db

@@ -142,66 +142,6 @@ class ModelTrainChecker:
                 if "duplicate column name" not in str(e):
                     logger.warning(f"Не удалось добавить столбец {column}: {str(e)}")
 
-
-
-    # def get_training_data(self, incremental: bool = False) -> Optional[Dict[str, np.ndarray]]:
-    #     """
-    #     Получает данные для обучения
-    #     Args:
-    #         incremental: Если True, возвращает только новые данные
-    #     """
-    #     try:
-    #         query = """
-    #             SELECT combination, field FROM results 
-    #             ORDER BY draw_number DESC 
-    #             LIMIT ?
-    #         """
-    #         limit = 500 if incremental else 10000
-            
-    #         with DatabaseManager() as db:
-    #             cursor = db.connection.cursor()
-    #             cursor.execute(query, (limit,))
-    #             data = cursor.fetchall()
-                
-    #             if len(data) < self.min_train_samples:
-    #                 logger.warning("Недостаточно данных для обучения")
-    #                 return None
-                
-    #             X, y = [], []
-    #             for row in data:
-    #                 try:
-    #                     comb = list(map(int, row['combination'].split(',')))
-    #                     if len(comb) == 8 and all(1 <= x <= 20 for x in comb):
-    #                         X.append(comb)
-    #                         y.append(int(row['field']))
-    #                 except Exception as e:
-    #                     logger.warning(f"Ошибка обработки данных: {str(e)}")
-    #                     continue
-                
-    #             return {
-    #                 'X_train': np.array(X, dtype=np.int32),
-    #                 'y_field': np.array(y, dtype=np.int32) - 1  # Конвертация 1-4 → 0-3
-    #             }
-    #     except Exception as e:
-    #         logger.error(f"Ошибка загрузки данных: {str(e)}")
-    #         return None
-    # def _check_should_train(self, cursor) -> Tuple[bool, str]:
-    #     """Проверяет необходимость обучения используя существующий курсор"""
-    #     cursor.execute("SELECT * FROM model_training_history ORDER BY train_time DESC LIMIT 1")
-    #     last_train = cursor.fetchone()
-        
-    #     if not last_train or not os.path.exists('models/lstm_model.keras'):
-    #         return True, "Первое обучение"
-        
-    #     last_time = datetime.fromisoformat(last_train['train_time'])
-    #     if (datetime.now() - last_time) > self.retrain_interval:
-    #         return True, "Плановое переобучение"
-        
-    #     cursor.execute("SELECT COUNT(*) FROM results WHERE draw_date > ?", (last_train['train_time'],))
-    #     new_data = cursor.fetchone()[0]
-        
-    #     return (new_data >= self.new_data_threshold, 
-    #         f"Новых данных: {new_data} (порог: {self.new_data_threshold})")
     def _check_should_train(self, cursor) -> Tuple[bool, str]:
         """Проверяет необходимость обучения используя существующий курсор"""
         cursor.execute("SELECT * FROM model_training_history ORDER BY train_time DESC LIMIT 1")

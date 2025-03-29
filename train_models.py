@@ -3,7 +3,7 @@ import sqlite3
 import numpy as np
 import json
 import logging
-from config import LOGGING_CONFIG
+from config import LOGGING_CONFIG, SEQUENCE_LENGTH, NUMBERS_RANGE, COMBINATION_LENGTH
 
 # Настройка логгера
 logging.basicConfig(**LOGGING_CONFIG)
@@ -35,7 +35,7 @@ class ModelTrainChecker:
         os.makedirs(self.error_model_dir, exist_ok=True)
         
         self.min_train_samples = 100
-        self.new_data_threshold = 20
+        self.new_data_threshold = 1
         self.retrain_interval = timedelta(days=1)
         self.min_error_samples = 50
         self._init_db_tables()
@@ -166,43 +166,65 @@ class ModelTrainChecker:
         return (new_data >= self.new_data_threshold,
                 f"Новых данных: {new_data} (порог: {self.new_data_threshold})")
 
+
     def get_training_model(self, cursor, incremental: bool) -> Optional[dict]:
-        """Получение данных для обучения"""
+        """Подготавливает данные для обучения"""
         try:
-            limit = 500 if incremental else 10000
+            limit = 1000  # Достаточно для 30 последовательностей
             cursor.execute("""
                 SELECT combination, field FROM results 
                 ORDER BY draw_number DESC LIMIT ?
             """, (limit,))
             
             rows = cursor.fetchall()
-            if len(rows) < 100:
+            if len(rows) < SEQUENCE_LENGTH + 1:  # Нужно хотя бы SEQUENCE_LENGTH+1 комбинаций
+                logger.error(f"Недостаточно данных. Нужно минимум {SEQUENCE_LENGTH+1} записей")
                 return None
                 
-            X_train = []
-            y_field = []
+            # Подготовка данных
+            combinations = []
+            fields = []
             
             for row in rows:
-                # Преобразуем строку комбинации в список чисел
                 try:
-                    comb = [int(x.strip()) for x in row['combination'].split(',')]
-                    field = int(row['field'])
-                    
-                    if len(comb) == 8 and all(1 <= x <= 20 for x in comb):
-                        X_train.append(comb)
-                        y_field.append(field - 1)  # Конвертируем 1-4 в 0-3
-                except (ValueError, AttributeError) as e:
-                    logger.warning(f"Ошибка обработки данных: {str(e)}")
+                    comb = list(map(int, row['combination'].split(',')))
+                    if len(comb) != COMBINATION_LENGTH:
+                        continue
+                    combinations.append(comb)
+                    fields.append(row['field'] - 1)  # Поля 0-3
+                except ValueError:
                     continue
             
+            # Формирование последовательностей
+            X = []
+            y_field = []
+            y_comb = []
+            
+            for i in range(len(combinations) - SEQUENCE_LENGTH):
+                # Входная последовательность
+                seq = combinations[i:i + SEQUENCE_LENGTH]
+                
+                # Целевые значения
+                target_comb = combinations[i + SEQUENCE_LENGTH]
+                target_field = fields[i + SEQUENCE_LENGTH]
+                
+                # One-hot кодирование комбинации
+                comb_encoded = np.zeros((COMBINATION_LENGTH, NUMBERS_RANGE))
+                for pos, num in enumerate(target_comb):
+                    comb_encoded[pos, num - 1] = 1
+                
+                X.append(seq)
+                y_field.append(target_field)
+                y_comb.append(comb_encoded)
+            
             return {
-                'X_train': np.array(X_train, dtype=np.int32),
+                'X_train': np.array(X, dtype=np.int32),
                 'y_field': np.array(y_field, dtype=np.int32),
-                'incremental': incremental
+                'y_comb': np.array(y_comb, dtype=np.float32)
             }
             
         except Exception as e:
-            logger.error(f"Ошибка получения данных: {str(e)}")
+            logger.error(f"Ошибка подготовки данных: {str(e)}")
             return None
 
     def update_training_info(self, data_count: int, accuracy: float = None) -> bool:

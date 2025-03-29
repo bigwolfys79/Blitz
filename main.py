@@ -115,14 +115,12 @@ class ModelTrainer:
                     # 2. Получение данных для обучения (передаем курсор)
                     incremental = "инкрементальное" in reason.lower()
                     training_data = self.checker.get_training_model(cursor, incremental)
-                    
                     if not training_data:
                         logger.error("Не удалось получить данные для обучения")
                         return False
-                                            
-                    # 3. Обучение модели (используем функцию train_and_save_model)
+
                     model_result = train_and_save_model(training_data)
-                        
+
                     if not model_result.get('success', False):
                         logger.error(f"Ошибка обучения: {model_result.get('message', 'Unknown error')}")
                         return False

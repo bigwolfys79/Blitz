@@ -16,8 +16,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_PATH = 'results.db'
 
 # Настройки моделей
-SEQUENCE_LENGTH = 8
+SEQUENCE_LENGTH = 30  # Теперь управляем отсюда!
 NUM_CLASSES = 4
+COMBINATION_LENGTH = 8
+NUMBERS_RANGE = 20
+MODEL_INPUT_SHAPE = (SEQUENCE_LENGTH, COMBINATION_LENGTH)  # Автоматически рассчитывается
 MODEL_SAVE_PATH = os.path.join(BASE_DIR, 'models')  # Путь к директории models
 
 # Настройки парсинга

@@ -388,18 +388,16 @@ def save_prediction_to_db(
         logging.error(f"Неожиданная ошибка при сохранении предсказания: {e}")
         raise
 
-def load_data_from_db() -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Dict[str, np.ndarray]]]:
-    """Загружает данные из базы данных для обучения моделей"""
+def load_data_from_db() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Загружает данные для обучения модели"""
     try:
         with DatabaseManager() as db:
-            cursor = db.connection.cursor()  # Получаем курсор из соединения
-            
-            # Загрузка основных данных
+            cursor = db.connection.cursor()
             cursor.execute('SELECT combination, field FROM results ORDER BY draw_number')
             results = cursor.fetchall()
             
             if not results:
-                return np.array([]), np.array([]), np.array([]), {}
+                return np.array([]), np.array([]), np.array([])
             
             X = []
             y_field = []
@@ -407,22 +405,30 @@ def load_data_from_db() -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, D
             
             for row in results:
                 try:
+                    # Преобразуем комбинацию в список чисел
                     comb = [int(x.strip()) for x in row['combination'].split(',')]
+                    if len(comb) != 8:
+                        continue
+                    
+                    # One-hot кодировка комбинации (8 чисел × 20 вариантов)
+                    comb_encoded = np.zeros((8, 20))
+                    for i, num in enumerate(comb):
+                        if 1 <= num <= 20:
+                            comb_encoded[i, num - 1] = 1  # Числа 1-20 → индексы 0-19
+                    
                     X.append(comb)
-                    y_field.append(row['field'])
-                    y_comb.append(comb)
+                    y_field.append(row['field'] - 1)  # Поле 1-4 → 0-3
+                    y_comb.append(comb_encoded)
+                    
                 except (ValueError, AttributeError) as e:
                     logging.warning(f"Ошибка обработки строки {row}: {str(e)}")
                     continue
             
-            if not X:  # Если все строки оказались некорректными
-                return np.array([]), np.array([]), np.array([]), {}
+            return np.array(X), np.array(y_field), np.array(y_comb)
             
-            return np.array(X), np.array(y_field), np.array(y_comb), {}
-    
     except Exception as e:
-        logging.error(f"Ошибка загрузки данных из БД: {str(e)}", exc_info=True)
-        return np.array([]), np.array([]), np.array([]), {}
+        logging.error(f"Ошибка загрузки данных: {str(e)}", exc_info=True)
+        return np.array([]), np.array([]), np.array([])
 
 def compare_predictions_with_real_data() -> None:
     """Сравнивает предсказания с реальными результатами"""

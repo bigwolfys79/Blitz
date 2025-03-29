@@ -9,13 +9,14 @@ tf.autograph.set_verbosity(0)  # Отключаем логи AutoGraph
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # 0 = все, 3 = ничего
 tf.keras.utils.disable_interactive_logging()  # Отключает прогресс-бары
 from tensorflow.keras.models import Sequential, load_model # type: ignore
-from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, BatchNormalization # type: ignore
+from tensorflow.keras import Model # type: ignore
+from tensorflow.keras.layers import Conv1D, Input, Reshape, LSTM, Dense, Dropout, BatchNormalization # type: ignore
 from tensorflow.keras.optimizers import Adam # type: ignore
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau # type: ignore
 from tensorflow.keras.regularizers import l2 # type: ignore
 from typing import Dict, List, Tuple, Optional, Any
 import logging
-import logging
+from config import SEQUENCE_LENGTH, MODEL_INPUT_SHAPE, NUM_CLASSES, NUMBERS_RANGE, COMBINATION_LENGTH
 from config import LOGGING_CONFIG
 
 # Настройка логгера
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 # @contextmanager
 
 class LSTMModel:
-    def __init__(self, input_shape: Tuple[int, int] = (8, 1), num_classes: int = 4):
+    def __init__(self, input_shape: Tuple[int, int] = MODEL_INPUT_SHAPE, num_classes: int = NUM_CLASSES):
         self.model_dir = 'models'
         os.makedirs(self.model_dir, exist_ok=True)
         self.input_shape = input_shape
@@ -49,69 +50,137 @@ class LSTMModel:
 
 
 
-    def _build_model(self) -> Sequential:
-        """Строит архитектуру LSTM модели"""
-        model = Sequential([
-            Input(shape=self.input_shape),
-            LSTM(256, return_sequences=True,
-                kernel_regularizer=l2(0.01),
-                recurrent_regularizer=l2(0.01)),
-            BatchNormalization(),
-            Dropout(0.4),
-            
-            LSTM(128, kernel_regularizer=l2(0.01)),
-            BatchNormalization(),
-            Dropout(0.3),
-            
-            Dense(64, activation='relu', kernel_regularizer=l2(0.01)),
-            Dense(self.num_classes, activation='softmax')
-        ])
+    def _build_model(self) -> Model:
+        """Строит модель LSTM с правильной архитектурой"""
+        input_layer = Input(shape=MODEL_INPUT_SHAPE)  # (30, 8)
         
-        optimizer = Adam(learning_rate=0.0005, clipnorm=1.0)
+        # Обрабатываем каждую комбинацию из 8 чисел
+        x = Conv1D(32, kernel_size=8, activation='relu')(input_layer)  # (30, 32)
+        x = BatchNormalization()(x)
+        
+        # Основной LSTM слой
+        x = LSTM(256, return_sequences=False,
+                kernel_regularizer=l2(0.01))(x)
+        x = Dropout(0.3)(x)
+        
+        # Выход для поля (1-4)
+        output_field = Dense(64, activation='relu')(x)
+        output_field = Dense(NUM_CLASSES, activation='softmax', 
+                           name='field_output')(output_field)
+        
+        # Выход для комбинации (8 чисел)
+        output_comb = Dense(8 * NUMBERS_RANGE, activation='softmax')(x)
+        output_comb = Reshape((8, NUMBERS_RANGE), name='comb_output')(output_comb)
+
+        model = Model(inputs=input_layer, outputs=[output_field, output_comb])
+        
+        optimizer = Adam(learning_rate=0.0005)
         model.compile(
             optimizer=optimizer,
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
+            loss={
+                'field_output': 'sparse_categorical_crossentropy',
+                'comb_output': 'categorical_crossentropy'
+            },
+            metrics={
+                'field_output': 'accuracy',
+                'comb_output': 'accuracy'
+            }
         )
         return model
 
     def train(self, X_train: np.ndarray, y_field: np.ndarray, 
-             epochs: int = 150, batch_size: int = 64) -> Optional[Dict[str, list]]:
-        """Обучает модель"""
-            # Проверка типов данных
-        if X_train.dtype != np.int32 or y_field.dtype != np.int32:
-            logger.error("Некорректный тип данных. Ожидаются np.int32")
-            return None
-        
-        if not self._validate_data(X_train, y_field):
-            return None
-            
-        X_reshaped = self._prepare_input(X_train)
-        y_field = np.array(y_field, dtype=np.int32)
-        
-        callbacks = [
-            EarlyStopping(patience=20, restore_best_weights=True, monitor='val_accuracy'),
-            ModelCheckpoint(
-                os.path.join(self.model_dir, 'best_lstm_model.keras'),
-                save_best_only=True,
-                monitor='val_accuracy'
-            ),
-            ReduceLROnPlateau(factor=0.5, patience=10)
-        ]
-        
+         y_comb: np.ndarray, epochs: int = 150, 
+         batch_size: int = 64) -> Optional[Dict[str, list]]:
+        """Обучение модели с явным указанием режима early stopping"""
         try:
+            # Проверка и нормализация данных
+            if len(X_train) == 0:
+                logger.error("Нет данных для обучения")
+                return None
+                
+            X_normalized = (X_train - 1) / 19.0
+            
+            # Callbacks с явным указанием режима
+            callbacks = [
+                EarlyStopping(
+                    monitor='val_comb_output_accuracy',
+                    patience=20,
+                    restore_best_weights=True,
+                    mode='max',  # Явно указываем максимизацию точности
+                    verbose=0
+                ),
+                ModelCheckpoint(
+                    os.path.join(self.model_dir, 'best_lstm_model.keras'),
+                    monitor='val_comb_output_accuracy',
+                    save_best_only=True,
+                    mode='max',  # Аналогично для сохранения лучшей модели
+                    verbose=0
+                ),
+                ReduceLROnPlateau(
+                    monitor='val_loss',
+                    factor=0.5,
+                    patience=10,
+                    mode='min',  # Для loss минимизируем
+                    verbose=0
+                )
+            ]
+            
             history = self.model.fit(
-                X_reshaped, y_field,
+                X_normalized,
+                {
+                    'field_output': y_field,
+                    'comb_output': y_comb
+                },
                 epochs=epochs,
                 batch_size=batch_size,
                 validation_split=0.2,
                 callbacks=callbacks,
                 verbose=0
             )
+            
             self.save_model()
             return history.history
+            
         except Exception as e:
-            logger.error(f"Ошибка обучения: {str(e)}")
+            logger.error(f"Ошибка обучения: {str(e)}", exc_info=True)
+            return None
+
+    def save_model(self, filename: str = 'lstm_model.keras') -> bool:
+        """Сохраняет модель"""
+        try:
+            path = os.path.join(self.model_dir, filename)
+            self.model.save(path)
+            logger.info(f"Модель сохранена: {path}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка сохранения: {str(e)}")
+            return False
+            
+            # Обучение модели
+            history = self.model.fit(
+                X_reshaped,
+                {
+                    'field_output': y_field,
+                    'comb_output': y_comb
+                },
+                epochs=epochs,
+                batch_size=batch_size,
+                validation_split=0.2,
+                callbacks=callbacks,
+                verbose=0  # Изменили на 1 для более подробного вывода
+            )
+            
+            self.save_model()
+            return {
+                'field_accuracy': history.history['field_output_accuracy'],
+                'comb_accuracy': history.history['comb_output_accuracy'],
+                'val_field_accuracy': history.history['val_field_output_accuracy'],
+                'val_comb_accuracy': history.history['val_comb_output_accuracy'],
+                'loss': history.history['loss'],
+                'val_loss': history.history['val_loss']
+            }            
+        except Exception as e:
+            logger.error(f"Ошибка обучения: {str(e)}", exc_info=True)
             return None
 
     def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, float]:
@@ -171,27 +240,30 @@ class LSTMModel:
 
 
 def train_and_save_model(data: dict) -> dict:
-    """
-    Обучает модель LSTM и сохраняет её
-    """
+    """Обучает модель LSTM и сохраняет её"""
     try:
-        # 1. Создаём экземпляр модели
         model = LSTMModel()
         
-        # 2. Получаем данные для обучения
+        # Проверяем наличие всех необходимых данных
+        required_keys = ['X_train', 'y_field', 'y_comb']
+        if not all(key in data for key in required_keys):
+            return {
+                'success': False,
+                'message': f'Отсутствуют необходимые данные. Требуются: {required_keys}'
+            }
+            
         X_train = data['X_train']
         y_field = data['y_field']
+        y_comb = data['y_comb']
         
-        # 3. Проверяем, что данных достаточно
         if len(X_train) < 100:
             return {
                 'success': False, 
-                'message': 'Недостаточно данных для обучения (требуется минимум 100 записей)'
+                'message': 'Недостаточно данных для обучения (минимум 100 записей)'
             }
         
-        # 4. Обучаем модель
         with LSTMModel() as model:
-            history = model.train(X_train, y_field)
+            history = model.train(X_train, y_field, y_comb)
         
         if not history:
             return {
@@ -199,15 +271,12 @@ def train_and_save_model(data: dict) -> dict:
                 'message': 'Ошибка во время обучения модели'
             }
         
-        # 5. Возвращаем результат
         return {
             'success': True,
             'data_count': len(X_train),
-            'accuracy': history.get('val_accuracy', [0])[-1],  # Последнее значение точности
-            'metrics': {
-                'loss': history.get('loss', [0])[-1],
-                'val_loss': history.get('val_loss', [0])[-1]
-            },
+            'field_accuracy': history.get('val_field_accuracy', [0])[-1],
+            'comb_accuracy': history.get('val_comb_accuracy', [0])[-1],
+            'loss': history.get('val_loss', [0])[-1],
             'message': 'Модель успешно обучена'
         }
         

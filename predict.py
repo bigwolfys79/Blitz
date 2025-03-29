@@ -12,7 +12,7 @@ tf.keras.utils.disable_interactive_logging()  # Отключает прогре�
 from typing import List, Tuple, Optional
 import sqlite3
 import logging
-from config import MODEL_SAVE_PATH, SEQUENCE_LENGTH, NUM_CLASSES
+from config import MODEL_SAVE_PATH, SEQUENCE_LENGTH, NUM_CLASSES, SEQUENCE_LENGTH
 from database import DatabaseManager
 from collections import defaultdict
 
@@ -304,43 +304,53 @@ class LotteryPredictor:
             return cursor.fetchone() is not None
 
     def save_or_update_prediction(self, draw_number: int, combination: List[int], field: int) -> bool:
-        """Сохраняет или обновляет предсказание
-        
-        Args:
-            draw_number: Номер тиража
-            combination: Список чисел комбинации (8 чисел)
-            field: Номер поля (от 1 до 4)
-            
-        Returns:
-            bool: True если сохранение успешно, False при ошибке
-        """
-        # Валидация входных данных
-        if not isinstance(draw_number, int) or draw_number <= 0:
-            logging.error(f"Некорректный номер тиража: {draw_number}")
-            return False
-            
-        if not combination or len(combination) != 8:
-            logging.error(f"Комбинация должна содержать 8 чисел. Получено: {len(combination)}")
-            return False
-            
-        if not isinstance(field, int) or field < 1 or field > 4:
-            logging.error(f"Номер поля должен быть от 1 до 4. Получено: {field}")
-            return False
-
+        """Сохраняет или обновляет предсказание"""
         try:
-            comb_str = ', '.join(map(str, sorted(combination)))
+            # Логируем начало операции
+            logging.info("Начало сохранения/обновления предсказания.")
+            logging.debug(f"Параметры: draw_number={draw_number}, combination={combination}, field={field}")
             
+            # Валидация входных данных
+            if not isinstance(draw_number, int) or draw_number <= 0:
+                logging.error(f"Некорректный номер тиража: {draw_number}")
+                return False
+            
+            if not combination or len(combination) != 8:
+                logging.error(f"Комбинация должна содержать 8 чисел. Получено: {len(combination)}")
+                return False
+            
+            if not isinstance(field, int):
+                try:
+                    field = int(field)
+                    logging.debug(f"Преобразовано в тип int: {field}")
+                except ValueError:
+                    logging.error(f"Ошибка преобразования. Невозможно привести {field} к типу int.")
+                    return False
+            
+            if field < 1 or field > 4:
+                logging.error(f"Номер поля должен быть от 1 до 4. Получено: {field}")
+                return False
+            
+            logging.info(f"Проверка параметров завершена успешно.")
+
+            # Преобразуем комбинацию в строку
+            comb_str = ', '.join(map(str, sorted(combination)))
+            logging.debug(f"Комбинация преобразована в строку: {comb_str}")
+            
+            # Работа с БД
             with DatabaseManager() as db:
                 cursor = db.connection.cursor()
                 
                 # Проверяем существование записи
                 cursor.execute(
-                    'SELECT 1 FROM predictions WHERE draw_number = ?', 
+                    'SELECT 1 FROM predictions WHERE draw_number = ?',
                     (draw_number,)
                 )
                 exists = cursor.fetchone() is not None
+                logging.debug(f"Существует ли запись с draw_number={draw_number}: {exists}")
                 
                 if exists:
+                    # Обновляем существующее предсказание
                     cursor.execute('''
                         UPDATE predictions 
                         SET predicted_combination = ?,
@@ -351,23 +361,26 @@ class LotteryPredictor:
                     ''', (comb_str, field, self.model_name, draw_number))
                     logging.info(f"Обновлено предсказание для тиража {draw_number}")
                 else:
+                    # Создаем новое предсказание
                     cursor.execute('''
                         INSERT INTO predictions 
-                        (draw_number, predicted_combination, predicted_field, model_name)
-                        VALUES (?, ?, ?, ?)
+                        (draw_number, predicted_combination, predicted_field, model_name, created_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                     ''', (draw_number, comb_str, field, self.model_name))
-                    logging.info(f"Сохранено предсказание для тиража {draw_number}")
+                    logging.info(f"Создано предсказание для тиража {draw_number}")
                 
                 db.connection.commit()
+                logging.info(f"Операция для тиража {draw_number} успешно завершена.")
                 return True
-                
+
         except sqlite3.Error as e:
-            logging.error(f"Ошибка БД при сохранении предсказания: {str(e)}")
+            logging.error(f"Ошибка БД при сохранении предсказания: {e}")
             if 'db' in locals():
                 db.connection.rollback()
             return False
+
         except Exception as e:
-            logging.error(f"Неожиданная ошибка: {str(e)}")
+            logging.error(f"Неожиданная ошибка: {e}")
             return False
 
 
@@ -383,13 +396,12 @@ class LotteryPredictor:
     def get_last_combinations(self, limit: int) -> List[List[int]]:
         """Получает последние комбинации из БД"""
         with DatabaseManager() as db:
-            cursor = db.connection.cursor()  # Получаем курсор
+            cursor = db.connection.cursor()
             cursor.execute(
                 "SELECT combination FROM results ORDER BY draw_number DESC LIMIT ?",
                 (limit,)
             )
-            results = cursor.fetchall()  # Теперь fetchall() будет работать
-            return [[int(num) for num in row['combination'].split(',')] for row in results]
+            return [[int(num) for num in row['combination'].split(',')] for row in cursor.fetchall()]
 
     def _get_last_draw_number(self) -> int:
         """Возвращает номер последнего тиража"""
@@ -400,50 +412,47 @@ class LotteryPredictor:
             return result[0] if result else 0
 
     def predict_next(self) -> Tuple[int, List[int], int]:
-        """
-        Предсказывает следующий тираж
-        
-        Returns:
-            Tuple[int, List[int], int]: (номер тиража, комбинация, поле)
-        """
+        """Предсказывает следующий тираж с учетом SEQUENCE_LENGTH"""
         try:
-            # Получаем последние комбинации
+            # 1. Получаем последние SEQUENCE_LENGTH комбинаций
             last_combinations = self.get_last_combinations(self.sequence_length)
-            
-            # Проверяем достаточность данных
             if len(last_combinations) < self.sequence_length:
-                raise ValueError(
-                    f"Недостаточно данных для предсказания. "
-                    f"Требуется: {self.sequence_length}, "
-                    f"получено: {len(last_combinations)}"
-                )
+                raise ValueError(f"Требуется {self.sequence_length} комбинаций, получено {len(last_combinations)}")
+
+            # 2. Подготавливаем входные данные (форма: [1, SEQUENCE_LENGTH, COMBINATION_LENGTH])
+            X = np.array([last_combinations], dtype=np.float32)  # Форма: (1, 30, 8)
+            X = (X - 1) / 19  # Нормализация [1-20] -> [0-1]
+
+            # 3. Предсказание модели
+            field_probs, comb_probs = self.model.predict(X, verbose=0)
+
+            # 4. Обработка предсказанного поля (1-4)
+            predicted_field = np.argmax(field_probs[0]) + 1
+
+            # 5. Обработка предсказанной комбинации (8 уникальных чисел)
+            predicted_comb = []
+            used_numbers = set()
             
-            # Получаем номер следующего тиража
-            last_draw_num = self._get_last_draw_number()
-            next_draw_num = (int(last_draw_num) + 1) if last_draw_num else 1
-
-            # Генерируем предсказания
-            predicted_field = self._predict_field(last_combinations)
-            predicted_combination = self._generate_combination(last_combinations)
-
-            # Валидация результатов (обновлённая проверка)
-            if not isinstance(predicted_field, int):
-                raise ValueError(f"Тип предсказанного поля должен быть int, получено {type(predicted_field)}")
+            for i in range(8):  # Для каждого из 8 чисел
+                probs = comb_probs[0][i]  # Вероятности для i-го числа
+                sorted_num_indices = np.argsort(probs)[::-1]  # Сортировка по убыванию
                 
-            if predicted_field < 1 or predicted_field > 4:
-                raise ValueError(
-                    f"Предсказанное поле {predicted_field} вне диапазона. "
-                    f"Должно быть 1, 2, 3 или 4"
-                )
-            
-            return next_draw_num, predicted_combination, predicted_field
+                for num_idx in sorted_num_indices:
+                    num = num_idx + 1  # Преобразуем индекс 0-19 -> число 1-20
+                    if num not in used_numbers:
+                        predicted_comb.append(num)
+                        used_numbers.add(num)
+                        break
 
-        except ValueError as ve:
-            logging.error(f"Ошибка валидации: {ve}")
-            raise
+            # 6. Получаем номер следующего тиража
+            last_draw_num = self._get_last_draw_number()
+            next_draw_num = last_draw_num + 1 if last_draw_num else 1
+
+            return next_draw_num, sorted(predicted_comb), predicted_field
+
         except Exception as e:
-            logging.error(f"Ошибка предсказания: {e}", exc_info=True)
-            raise PredictionError("Ошибка при выполнении предсказания") from e
+            logging.error(f"Ошибка предсказания: {str(e)}", exc_info=True)
+            raise PredictionError(f"Ошибка предсказания: {str(e)}")
 
 
     def _predict_field(self, sequences: List[List[int]]) -> int:
@@ -471,32 +480,46 @@ class LotteryPredictor:
             logging.error(f"Ошибка предсказания поля: {e}")
             return 1  # Значение по умолчанию
 
-    def _generate_combination(self, last_combinations: List[List[int]]) -> List[int]:
+    def load_data_from_db() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Загружает данные из базы данных для обучения моделей"""
         try:
-            num_counts = {num: 0 for num in range(1, 21)}
-            for comb in last_combinations:
-                for num in comb:
-                    if 1 <= num <= 20:
-                        num_counts[num] += 1
-
-            sorted_numbers = sorted(num_counts.items(), key=lambda x: (-x[1], x[0]))
-            
-            result = []
-            for num, count in sorted_numbers:
-                if num not in result:
-                    result.append(num)
-                    if len(result) == self.combination_length:
-                        break
-            
-            while len(result) < self.combination_length:
-                new_num = np.random.randint(1, 21)
-                if new_num not in result:
-                    result.append(new_num)
-
-            return sorted(result)
+            with DatabaseManager() as db:
+                cursor = db.connection.cursor()
+                cursor.execute('SELECT combination, field FROM results ORDER BY draw_number')
+                results = cursor.fetchall()
+                
+                if not results:
+                    return np.array([]), np.array([]), np.array([])
+                
+                X = []
+                y_field = []
+                y_comb = []
+                
+                for row in results:
+                    try:
+                        comb = [int(x.strip()) for x in row['combination'].split(',')]
+                        if len(comb) != 8:
+                            continue
+                        
+                        # One-hot кодировка комбинации (8 чисел × 20 вариантов)
+                        comb_encoded = np.zeros((8, 20))
+                        for i, num in enumerate(comb):
+                            if 1 <= num <= 20:
+                                comb_encoded[i, num - 1] = 1
+                        
+                        X.append(comb)
+                        y_field.append(row['field'] - 1)  # Поле 1-4 → 0-3
+                        y_comb.append(comb_encoded)
+                        
+                    except (ValueError, AttributeError) as e:
+                        logging.warning(f"Ошибка обработки строки {row}: {str(e)}")
+                        continue
+                
+                return np.array(X), np.array(y_field), np.array(y_comb)
+                
         except Exception as e:
-            logging.error(f"Ошибка генерации комбинации: {e}")
-            raise
+            logging.error(f"Ошибка загрузки данных из БД: {str(e)}", exc_info=True)
+            return np.array([]), np.array([]), np.array([])
 
 
     def predict_and_save(self) -> bool:

@@ -2,7 +2,6 @@ import time
 import signal
 
 import numpy as np 
-import aiosqlite
 import os
 import logging
 from config import LOGGING_CONFIG
@@ -153,7 +152,7 @@ def main():
     try:
         while not GracefulExit.stop:
             cycle_start = datetime.now()
-            logger.info(f"Начало цикла обработки в {cycle_start}")
+            logger.info(f"Начало цикла обработки в {cycle_start.strftime('%Y-%m-%d %H:%M:%S')}")
 
             
             # 1. Ожидание следующего цикла (ВОТ ОН, ВОЗВРАЩЕННЫЙ БЛОК)

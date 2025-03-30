@@ -64,7 +64,7 @@ class LotteryPredictor:
             cursor.execute("""
                 INSERT INTO model_training_history 
                 (train_time, data_count, model_version, accuracy, loss, training_duration)
-                VALUES (datetime('now'), ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 result['data_count'],
                 result['version'],
@@ -77,7 +77,7 @@ class LotteryPredictor:
             cursor.execute("""
                 INSERT OR REPLACE INTO model_metadata 
                 (model_name, last_trained, version, performance_metrics)
-                VALUES (?, datetime('now'), ?, ?)
+                VALUES (?, ?, ?, ?)
             """, (
                 "lstm_model",
                 result['version'],

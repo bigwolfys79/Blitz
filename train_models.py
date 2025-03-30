@@ -3,12 +3,12 @@ import sqlite3
 import numpy as np
 import json
 import logging
-from config import LOGGING_CONFIG, SEQUENCE_LENGTH, NUMBERS_RANGE, COMBINATION_LENGTH
+from config import NEW_DATA_THRESHOLD, RETRAIN_HOURS, LOGGING_CONFIG, SEQUENCE_LENGTH, NUMBERS_RANGE, COMBINATION_LENGTH
 
 # Настройка логгера
 logging.basicConfig(**LOGGING_CONFIG)
 from typing import Dict, List, Tuple, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from database import DatabaseManager
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')  # Уровень ERROR и выше
@@ -35,78 +35,134 @@ class ModelTrainChecker:
         os.makedirs(self.error_model_dir, exist_ok=True)
         
         self.min_train_samples = 100
-        self.new_data_threshold = 1
-        self.retrain_interval = timedelta(days=1)
+        self.new_data_threshold = NEW_DATA_THRESHOLD
+        self.retrain_interval = timedelta(hours=RETRAIN_HOURS)
         self.min_error_samples = 50
         self._init_db_tables()
 
 
 
     def _init_db_tables(self):
-        """Инициализирует таблицы БД для хранения истории обучения"""
+        """Инициализирует все таблицы БД с проверкой существования и обработкой ошибок"""
         try:
             db = DatabaseManager()
             with db.db_session() as conn:
                 cursor = conn.cursor()
-                
-                # 1. Таблица истории обучения основной модели
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS model_training_history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        train_time TEXT NOT NULL,
-                        data_count INTEGER NOT NULL,
-                        model_version TEXT NOT NULL,
-                        accuracy FLOAT,
-                        loss FLOAT,
-                        training_duration INTEGER,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                # 2. Таблица истории обучения корректирующих моделей
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS error_model_history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        train_time TEXT NOT NULL,
-                        error_samples INTEGER NOT NULL,
-                        field_accuracy FLOAT,
-                        comb_accuracy FLOAT,
-                        model_type TEXT,
-                        base_model_version TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                # 3. Таблица метаданных модели
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS model_metadata (
-                        model_name TEXT PRIMARY KEY,
-                        last_trained TIMESTAMP,
-                        version TEXT,
-                        parameters TEXT,
-                        performance_metrics TEXT,
-                        is_active BOOLEAN DEFAULT 1,
-                        description TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                # 4. Триггер для обновления метки времени
+
+                # Список таблиц и их определений
+                tables = {
+                    'results': """
+                        CREATE TABLE IF NOT EXISTS results (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            combination TEXT NOT NULL,
+                            field INTEGER NOT NULL,
+                            draw_number INTEGER NOT NULL,
+                            draw_date TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_update TIMESTAMP,
+                            UNIQUE(draw_number)
+                        )""",
+                    
+                    'model_training_history': """
+                        CREATE TABLE IF NOT EXISTS model_training_history (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            train_time TEXT NOT NULL,
+                            data_count INTEGER NOT NULL,
+                            model_version TEXT NOT NULL,
+                            accuracy FLOAT,
+                            loss FLOAT,
+                            training_duration INTEGER,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_data_time TEXT
+                        )""",
+                    
+                    'error_model_history': """
+                        CREATE TABLE IF NOT EXISTS error_model_history (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            train_time TEXT NOT NULL,
+                            error_samples INTEGER NOT NULL,
+                            field_accuracy FLOAT,
+                            comb_accuracy FLOAT,
+                            model_type TEXT,
+                            base_model_version TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )""",
+                    
+                    'model_metadata': """
+                        CREATE TABLE IF NOT EXISTS model_metadata (
+                            model_name TEXT PRIMARY KEY,
+                            last_trained TIMESTAMP,
+                            version TEXT,
+                            parameters TEXT,
+                            performance_metrics TEXT,
+                            is_active BOOLEAN DEFAULT 1,
+                            description TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_data_time TEXT
+                        )""",
+                    
+                    'predictions': """
+                        CREATE TABLE IF NOT EXISTS predictions (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            draw_number INTEGER NOT NULL,
+                            model_name TEXT NOT NULL,
+                            predicted_combination TEXT NOT NULL,
+                            predicted_field INTEGER NOT NULL,
+                            actual_combination TEXT,
+                            actual_field INTEGER,
+                            is_correct INTEGER,
+                            matched_numbers TEXT,
+                            match_count INTEGER,
+                            checked_at TIMESTAMP,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY(draw_number) REFERENCES results(draw_number) ON DELETE CASCADE
+                        )"""
+                }
+
+                # Создаем таблицы
+                for table_name, create_sql in tables.items():
+                    try:
+                        cursor.execute(create_sql)
+                        logger.debug(f"Таблица {table_name} создана/проверена")
+                    except sqlite3.Error as e:
+                        logger.error(f"Ошибка создания таблицы {table_name}: {str(e)}")
+                        raise
+
+                # Создаем индексы
+                indexes = [
+                    "CREATE INDEX IF NOT EXISTS idx_results_draw_number ON results(draw_number)",
+                    "CREATE INDEX IF NOT EXISTS idx_results_created ON results(created_at)",
+                    "CREATE INDEX IF NOT EXISTS idx_predictions_draw ON predictions(draw_number)"
+                ]
+
+                for index_sql in indexes:
+                    cursor.execute(index_sql)
+
+                # Триггер для автоматического обновления метки времени
                 cursor.execute("""
                     CREATE TRIGGER IF NOT EXISTS update_model_metadata_timestamp
                     AFTER UPDATE ON model_metadata
                     FOR EACH ROW
                     BEGIN
-                        UPDATE model_metadata SET updated_at = CURRENT_TIMESTAMP 
+                        UPDATE model_metadata 
+                        SET updated_at = CURRENT_TIMESTAMP 
                         WHERE model_name = NEW.model_name;
                     END
                 """)
-                
+
                 conn.commit()
-                
+                logger.info("Все таблицы и индексы успешно инициализированы")
+
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка SQL при инициализации БД: {str(e)}")
+            if 'conn' in locals():
+                conn.rollback()
+            raise
         except Exception as e:
-            logger.error(f"Ошибка инициализации таблиц БД: {str(e)}", exc_info=True)
+            logger.error(f"Критическая ошибка инициализации БД: {str(e)}", exc_info=True)
+            if 'conn' in locals():
+                conn.rollback()
             raise
 
     def _check_table_structure(self, cursor):
@@ -143,28 +199,80 @@ class ModelTrainChecker:
                     logger.warning(f"Не удалось добавить столбец {column}: {str(e)}")
 
     def _check_should_train(self, cursor) -> Tuple[bool, str]:
-        """Проверяет необходимость обучения используя существующий курсор"""
-        cursor.execute("SELECT * FROM model_training_history ORDER BY train_time DESC LIMIT 1")
+        """Проверяет необходимость обучения модели с улучшенной логикой"""
+        # 1. Проверяем наличие предыдущего обучения
+        cursor.execute("""
+            SELECT train_time, data_count, last_data_time 
+            FROM model_training_history 
+            ORDER BY train_time DESC 
+            LIMIT 1
+        """)
         last_train = cursor.fetchone()
         
+        # Если модель никогда не обучалась или файла модели нет - обучаем
         if not last_train or not os.path.exists('models/lstm_model.keras'):
-            return True, "Первое обучение"
+            return True, "Первое обучение модели"
         
-        last_time = datetime.fromisoformat(last_train['train_time'])
-        if (datetime.now() - last_time) > self.retrain_interval:
-            return True, "Плановое переобучение"
+        last_time = datetime.strptime(last_train['train_time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=None)
+        current_time = datetime.now()
+        time_since_last = current_time - last_time
         
-        # Используем сохранённое количество данных из журнала
+        # 2. Получаем количество новых данных с момента последнего обучения
+        new_data = 0
+        last_data_time = last_train['last_data_time'] or last_train['train_time']
+        
+        try:
+            cursor.execute("PRAGMA table_info(results)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            # Используем более точный метод подсчета
+            if 'created_at' in columns:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM results 
+                    WHERE created_at > ?
+                """, (last_data_time,))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM results 
+                    WHERE draw_date > ?
+                """, (last_data_time,))
+                
+            new_data = cursor.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Ошибка подсчета новых данных: {str(e)}")
+            return False, f"Ошибка подсчета данных: {str(e)}"
+        
+        # 3. Проверяем общее количество данных
         cursor.execute("SELECT COUNT(*) FROM results")
         total_data_now = cursor.fetchone()[0]
-
-        # Последнее количество данных, сохранённое при обучении
-        last_data_count = last_train['data_count']
-
-        new_data = total_data_now - last_data_count
-
-        return (new_data >= self.new_data_threshold,
-                f"Новых данных: {new_data} (порог: {self.new_data_threshold})")
+        
+        # 4. Формируем информационное сообщение
+        info_message = (
+            f"Новых данных: {new_data}/{self.new_data_threshold} | "
+            f"Всего данных: {total_data_now}/{self.min_train_samples} | "
+            f"Последнее обучение: {last_time.strftime('%d.%m %H:%M')} | "
+            f"Прошло времени: {time_since_last.days}д {time_since_last.seconds//3600}ч"
+        )
+        
+        # 5. Проверяем минимальное количество данных
+        if total_data_now < self.min_train_samples:
+            return False, f"{info_message} | Недостаточно общих данных"
+        
+        # 6. Проверяем новые данные (главное условие)
+        if new_data < self.new_data_threshold:
+            return False, f"{info_message} | Недостаточно новых данных"
+        
+        # 7. Проверяем временной интервал (если RETRAIN_HOURS > 0)
+        if self.retrain_interval.total_seconds() > 0:
+            if time_since_last < self.retrain_interval:
+                remaining = self.retrain_interval - time_since_last
+                return False, (
+                    f"{info_message} | Ожидание: {remaining.seconds//3600}ч "
+                    f"{(remaining.seconds%3600)//60}м"
+                )
+        
+        # 8. Если все условия выполнены
+        return True, f"{info_message} | Запуск обучения"
 
 
     def get_training_model(self, cursor, incremental: bool) -> Optional[dict]:
@@ -228,36 +336,76 @@ class ModelTrainChecker:
             return None
 
     def update_training_info(self, data_count: int, accuracy: float = None) -> bool:
-        """Обновляет информацию о тренировке в БД с проверкой структуры"""
+        """Обновляет информацию о тренировке с сохранением точного времени"""
         try:
             version = self._get_next_version()
             with DatabaseManager() as db:
                 cursor = db.connection.cursor()
                 
-                # 1. Проверяем и обновляем структуру таблицы
-                self._check_table_structure(cursor)
+                # 1. Проверяем наличие колонки created_at
+                cursor.execute("PRAGMA table_info(results)")
+                columns = [col[1] for col in cursor.fetchall()]
+                time_column = 'created_at' if 'created_at' in columns else 'draw_date'
                 
-                # 2. Вставляем данные
+                # 2. Получаем время последних данных (с защитой от None)
+                cursor.execute(f"""
+                    SELECT MAX({time_column}) FROM results 
+                    WHERE {time_column} IS NOT NULL
+                """)
+                last_data_result = cursor.fetchone()
+                last_data_time = (
+                    last_data_result[0] 
+                    if last_data_result and last_data_result[0] 
+                    else datetime.now().isoformat()
+                )
+                
+                # 3. Подготовка данных для вставки
+                metrics = json.dumps({'accuracy': accuracy}) if accuracy is not None else None
+                local_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # 4. Вставка в историю обучения
                 cursor.execute("""
                     INSERT INTO model_training_history 
-                    (train_time, data_count, model_version, accuracy, created_at)
-                    VALUES (datetime('now'), ?, ?, ?, datetime('now'))
-                """, (data_count, version, accuracy))
+                    (train_time, data_count, model_version, accuracy, 
+                    last_data_time, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (local_time, data_count, version, metrics, last_data_time, local_time))
                 
-                # 3. Обновляем метаданные
+                # 5. Обновление метаданных модели (ИСПРАВЛЕНО: добавлены недостающие параметры)
                 cursor.execute("""
                     INSERT OR REPLACE INTO model_metadata 
-                    (model_name, last_trained, version, performance_metrics, updated_at)
-                    VALUES (?, datetime('now'), ?, ?, datetime('now'))
-                """, ("lstm_model", version, 
-                    json.dumps({'accuracy': accuracy}) if accuracy else None))
+                    (model_name, version, performance_metrics, 
+                    last_data_time, updated_at, last_trained)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, ("lstm_model", version, metrics, last_data_time, local_time, local_time))
                 
                 db.connection.commit()
+                logger.info(
+                    f"Обновлена информация о обучении. Версия: {version}, "
+                    f"Данных: {data_count}, Точность: {accuracy}"
+                )
                 return True
                 
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка БД при обновлении информации: {str(e)}")
+            if 'db' in locals():
+                db.connection.rollback()
+            return False
         except Exception as e:
-            logger.error(f"Ошибка обновления информации: {str(e)}", exc_info=True)
-            db.connection.rollback()
+            logger.error(f"Неожиданная ошибка: {str(e)}", exc_info=True)
+            if 'db' in locals():
+                db.connection.rollback()
+            return False
+                
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка БД при обновлении информации: {str(e)}")
+            if 'db' in locals():
+                db.connection.rollback()
+            return False
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка: {str(e)}", exc_info=True)
+            if 'db' in locals():
+                db.connection.rollback()
             return False
 
     def _get_last_train_info(self) -> Optional[Dict[str, Any]]:
@@ -271,15 +419,31 @@ class ModelTrainChecker:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def _get_new_data_count(self, since_time: str) -> int:
+    def _get_new_data_count(self, since_time: datetime) -> int:
         """Считает количество новых данных с указанного времени"""
         with DatabaseManager() as db:
             cursor = db.connection.cursor()
-            cursor.execute("""
-                SELECT COUNT(*) FROM results 
-                WHERE draw_date > ?
-            """, (since_time,))
-            return cursor.fetchone()[0]
+            try:
+                # Пробуем использовать created_at, если доступен
+                cursor.execute("PRAGMA table_info(results)")
+                columns = [col[1] for col in cursor.fetchall()]
+                
+                if 'created_at' in columns:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM results 
+                        WHERE created_at > ?
+                    """, (since_time.isoformat(),))
+                else:
+                    # Fallback на draw_date, если created_at отсутствует
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM results 
+                        WHERE draw_date > ?
+                    """, (since_time.isoformat(),))
+                    
+                return cursor.fetchone()[0]
+            except Exception as e:
+                logger.error(f"Ошибка подсчета новых данных: {str(e)}")
+                return 0
 
     def _get_next_version(self) -> str:
         """Генерирует следующую версию модели"""

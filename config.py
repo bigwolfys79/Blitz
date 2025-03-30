@@ -1,6 +1,8 @@
 # config.py
 
 import os
+from datetime import datetime
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Отключает логи TensorFlow
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Отключаем oneDNN
 import logging
@@ -20,6 +22,8 @@ SEQUENCE_LENGTH = 30  # Теперь управляем отсюда!
 NUM_CLASSES = 4
 COMBINATION_LENGTH = 8
 NUMBERS_RANGE = 20
+RETRAIN_HOURS = 0      # интервал переобучения в часах (от 0 до 24)
+NEW_DATA_THRESHOLD = 20 # минимальное новых записей для обучения
 MODEL_INPUT_SHAPE = (SEQUENCE_LENGTH, COMBINATION_LENGTH)  # Автоматически рассчитывается
 MODEL_SAVE_PATH = os.path.join(BASE_DIR, 'models')  # Путь к директории models
 

@@ -34,21 +34,21 @@ BASE_URL = 'https://sportpari.by/ru/play/blits/game-results?filter_results_type=
 
 # Настройка логирования
 LOGGING_CONFIG = {
-    'filename': 'script.log',
+    'filename': 'logs/script.log',
     'level': logging.INFO,
     'encoding': 'utf-8',
     'format': '%(asctime)s - %(levelname)s - %(message)s',
-    'filemode': 'w'
+    'filemode': 'a'
 }
 
-# Настройка логирования для сравнений
-COMPARISON_LOGGING_CONFIG = {
-    'filename': 'comparison.log',  # Отдельный файл для логов сравнений
-    'level': logging.INFO,
-    'encoding': 'utf-8',
-    'format': '%(asctime)s - %(levelname)s - %(message)s',
-    'filemode': 'a'  # Режим добавления, чтобы не перезаписывать файл
-}
+# # Настройка логирования для сравнений
+# COMPARISON_LOGGING_CONFIG = {
+#     'filename': 'comparison.log',  # Отдельный файл для логов сравнений
+#     'level': logging.INFO,
+#     'encoding': 'utf-8',
+#     'format': '%(asctime)s - %(levelname)s - %(message)s',
+#     'filemode': 'a'  # Режим добавления, чтобы не перезаписывать файл
+# }
 
 # Настройки TensorFlow
 TF_CPP_MIN_LOG_LEVEL = '3'  # Отключает логи TensorFlow

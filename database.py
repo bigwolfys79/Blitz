@@ -3,7 +3,7 @@ import aiosqlite
 import logging
 import numpy as np
 import os
-from config import LOGGING_CONFIG, COMPARISON_LOGGING_CONFIG
+from config import LOGGING_CONFIG
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Optional, Iterator, List, Tuple, Union, Dict, Any 
@@ -14,26 +14,27 @@ tf.autograph.set_verbosity(0)  # Отключаем логи AutoGraph
 # Отключаем прогресс-бары и информационные сообщения
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # 0 = все, 3 = ничего
 tf.keras.utils.disable_interactive_logging()  # Отключает прогресс-бары
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(**LOGGING_CONFIG)
+# logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Настройка логгера для сравнений
-comparison_logger = logging.getLogger('comparison_logger')
-comparison_logger.setLevel(COMPARISON_LOGGING_CONFIG['level'])
+# # Настройка логгера для сравнений
+# logger = logging.getLogger('logger')
+# logger.setLevel(COMPARISON_LOGGING_CONFIG['level'])
 
-# Создаем обработчик для файла
-file_handler = logging.FileHandler(
-    filename=COMPARISON_LOGGING_CONFIG['filename'],
-    encoding=COMPARISON_LOGGING_CONFIG['encoding'],
-    mode=COMPARISON_LOGGING_CONFIG['filemode']
-)
-file_handler.setFormatter(logging.Formatter(COMPARISON_LOGGING_CONFIG['format']))
+# # Создаем обработчик для файла
+# file_handler = logging.FileHandler(
+#     filename=COMPARISON_LOGGING_CONFIG['filename'],
+#     encoding=COMPARISON_LOGGING_CONFIG['encoding'],
+#     mode=COMPARISON_LOGGING_CONFIG['filemode']
+# )
+# file_handler.setFormatter(logging.Formatter(COMPARISON_LOGGING_CONFIG['format']))
 
-# Добавляем обработчик к логгеру
-comparison_logger.addHandler(file_handler)
+# # Добавляем обработчик к логгеру
+# logger.addHandler(file_handler)
 
-# Отключаем распространение логов в корневой логгер, чтобы избежать дублирования
-comparison_logger.propagate = False
+# # Отключаем распространение логов в корневой логгер, чтобы избежать дублирования
+# logger.propagate = False
 from contextlib import contextmanager
 # Менеджер контекста для работы с БД
 @contextmanager
@@ -391,81 +392,81 @@ def save_to_database_batch(data_batch: List[Tuple[Union[str, datetime], Union[st
             logging.error(f"Неожиданная ошибка: {e}", exc_info=True)
             raise  
 
-def save_prediction_to_db(
-    model_name: str,
-    predicted_combination: List[int],
-    predicted_field: int,
-    actual_combination: Optional[List[int]] = None,
-    actual_field: Optional[int] = None
-) -> None:
-    """Сохраняет предсказание с реальными результатами"""
-    try:
-        with DatabaseManager() as db:
-            # Получаем номер тиража через метод класса
-            draw_number = db.get_max_draw_number()
+# def save_prediction_to_db(
+#     model_name: str,
+#     predicted_combination: List[int],
+#     predicted_field: int,
+#     actual_combination: Optional[List[int]] = None,
+#     actual_field: Optional[int] = None
+# ) -> None:
+#     """Сохраняет предсказание с реальными результатами"""
+#     try:
+#         with DatabaseManager() as db:
+#             # Получаем номер тиража через метод класса
+#             draw_number = db.get_max_draw_number()
             
-            cursor = db.connection.cursor()
+#             cursor = db.connection.cursor()
             
-            # Создаем таблицу если не существует (ИСПРАВЛЕНО: добавлена закрывающая скобка)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS predictions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    draw_number INTEGER NOT NULL,
-                    model_name TEXT NOT NULL,
-                    predicted_combination TEXT NOT NULL,
-                    predicted_field INTEGER NOT NULL,
-                    actual_combination TEXT,
-                    actual_field INTEGER,
-                    is_correct INTEGER,
-                    matched_numbers TEXT,
-                    match_count INTEGER,
-                    checked_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(draw_number) REFERENCES results(draw_number)
-                )
-            """)
+#             # Создаем таблицу если не существует (ИСПРАВЛЕНО: добавлена закрывающая скобка)
+#             cursor.execute("""
+#                 CREATE TABLE IF NOT EXISTS predictions (
+#                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+#                     draw_number INTEGER NOT NULL,
+#                     model_name TEXT NOT NULL,
+#                     predicted_combination TEXT NOT NULL,
+#                     predicted_field INTEGER NOT NULL,
+#                     actual_combination TEXT,
+#                     actual_field INTEGER,
+#                     is_correct INTEGER,
+#                     matched_numbers TEXT,
+#                     match_count INTEGER,
+#                     checked_at TIMESTAMP,
+#                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+#                     FOREIGN KEY(draw_number) REFERENCES results(draw_number)
+#                 )
+#             """)
             
-            # Вычисляем совпадения если есть фактические результаты
-            is_correct = None
-            matched_numbers = None
-            match_count = None
-            checked_at = None
+#             # Вычисляем совпадения если есть фактические результаты
+#             is_correct = None
+#             matched_numbers = None
+#             match_count = None
+#             checked_at = None
             
-            if actual_combination is not None and actual_field is not None:
-                match_count, matched_numbers = compare_combinations(predicted_combination, actual_combination)
-                is_correct = (match_count > 0) and (predicted_field == actual_field)
-                checked_at = datetime.now().isoformat()
+#             if actual_combination is not None and actual_field is not None:
+#                 match_count, matched_numbers = compare_combinations(predicted_combination, actual_combination)
+#                 is_correct = (match_count > 0) and (predicted_field == actual_field)
+#                 checked_at = datetime.now().isoformat()
             
-            # Преобразуем комбинации в строки (ИСПРАВЛЕНО: единообразный формат)
-            pred_comb_str = ' '.join(map(str, predicted_combination))
-            actual_comb_str = ' '.join(map(str, actual_combination)) if actual_combination else None
-            matched_numbers_str = ' '.join(map(str, matched_numbers)) if matched_numbers else None
+#             # Преобразуем комбинации в строки (ИСПРАВЛЕНО: единообразный формат)
+#             pred_comb_str = ' '.join(map(str, predicted_combination))
+#             actual_comb_str = ' '.join(map(str, actual_combination)) if actual_combination else None
+#             matched_numbers_str = ' '.join(map(str, matched_numbers)) if matched_numbers else None
             
-            cursor.execute('''
-                INSERT INTO predictions (
-                    draw_number, model_name,
-                    predicted_combination, predicted_field,
-                    actual_combination, actual_field,
-                    is_correct, matched_numbers,
-                    match_count, checked_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                draw_number, model_name,
-                pred_comb_str, predicted_field,
-                actual_comb_str, actual_field,
-                1 if is_correct else 0 if is_correct is not None else None,
-                matched_numbers_str,
-                match_count,
-                checked_at
-            ))
-            db.connection.commit()
+#             cursor.execute('''
+#                 INSERT INTO predictions (
+#                     draw_number, model_name,
+#                     predicted_combination, predicted_field,
+#                     actual_combination, actual_field,
+#                     is_correct, matched_numbers,
+#                     match_count, checked_at
+#                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#             ''', (
+#                 draw_number, model_name,
+#                 pred_comb_str, predicted_field,
+#                 actual_comb_str, actual_field,
+#                 1 if is_correct else 0 if is_correct is not None else None,
+#                 matched_numbers_str,
+#                 match_count,
+#                 checked_at
+#             ))
+#             db.connection.commit()
             
-    except sqlite3.Error as e:
-        logging.error(f"Ошибка сохранения предсказания в БД: {e}")
-        raise
-    except Exception as e:
-        logging.error(f"Неожиданная ошибка при сохранении предсказания: {e}")
-        raise
+#     except sqlite3.Error as e:
+#         logging.error(f"Ошибка сохранения предсказания в БД: {e}")
+#         raise
+#     except Exception as e:
+#         logging.error(f"Неожиданная ошибка при сохранении предсказания: {e}")
+#         raise
 
 def load_data_from_db() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Загружает данные для обучения модели"""
@@ -509,104 +510,104 @@ def load_data_from_db() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         logging.error(f"Ошибка загрузки данных: {str(e)}", exc_info=True)
         return np.array([]), np.array([]), np.array([])
 
-def compare_predictions_with_real_data() -> None:
-    """Сравнивает предсказания с реальными результатами"""
-    last_game = get_last_game()
-    if not last_game:
-        comparison_logger.info("Нет данных о последней игре")
-        return
+# def compare_predictions_with_real_data() -> None:
+#     """Сравнивает предсказания с реальными результатами"""
+#     last_game = get_last_game()
+#     if not last_game:
+#         logger.info("Нет данных о последней игре")
+#         return
 
-    draw_number, real_comb, real_field = last_game
-    with DatabaseManager() as db:
-        cursor = db.connection.cursor()
-        cursor.execute('''
-            SELECT id, model_name, predicted_combination, predicted_field
-            FROM predictions
-            WHERE draw_number = ? AND actual_combination IS NULL
-        ''', (draw_number,))
-        predictions = cursor.fetchall()
+#     draw_number, real_comb, real_field = last_game
+#     with DatabaseManager() as db:
+#         cursor = db.connection.cursor()
+#         cursor.execute('''
+#             SELECT id, model_name, predicted_combination, predicted_field
+#             FROM predictions
+#             WHERE draw_number = ? AND actual_combination IS NULL
+#         ''', (draw_number,))
+#         predictions = cursor.fetchall()
 
-    if not predictions:
-        comparison_logger.info(f"Нет новых предсказаний для тиража {draw_number}")
-        return
+#     if not predictions:
+#         logger.info(f"Нет новых предсказаний для тиража {draw_number}")
+#         return
 
-    comparison_logger.info(f"\nСравнение для тиража №{draw_number}:")
-    comparison_logger.info(f"Реальная комбинация: {real_comb}, Поле: {real_field}")
+#     logger.info(f"\nСравнение для тиража №{draw_number}:")
+#     logger.info(f"Реальная комбинация: {real_comb}, Поле: {real_field}")
 
-    for pred in predictions:
-        pred_comb = clean_combination(pred['predicted_combination'])
-        matched_count, matched_numbers = compare_combinations(pred_comb, real_comb)
-        is_field_correct = int(pred['predicted_field']) == real_field
+#     for pred in predictions:
+#         pred_comb = clean_combination(pred['predicted_combination'])
+#         matched_count, matched_numbers = compare_combinations(pred_comb, real_comb)
+#         is_field_correct = int(pred['predicted_field']) == real_field
 
-        comparison_logger.info(f"\nМодель {pred['model_name']}:")
-        comparison_logger.info(f"  Предсказано: {pred_comb}, Поле: {pred['predicted_field']}")
-        comparison_logger.info(f"  Совпадений: {matched_count} ({matched_numbers})")
-        comparison_logger.info(f"  Поле: {'Совпало' if is_field_correct else 'Не совпало'}")
+#         logger.info(f"\nМодель {pred['model_name']}:")
+#         logger.info(f"  Предсказано: {pred_comb}, Поле: {pred['predicted_field']}")
+#         logger.info(f"  Совпадений: {matched_count} ({matched_numbers})")
+#         logger.info(f"  Поле: {'Совпало' if is_field_correct else 'Не совпало'}")
 
-        with DatabaseManager() as db:
-            cursor = db.connection.cursor()
-            cursor.execute('''
-                UPDATE predictions
-                SET actual_combination = ?, actual_field = ?, is_correct = ?
-                WHERE id = ?
-            ''', (
-                ', '.join(map(str, real_comb)),
-                real_field,
-                matched_count > 0 and is_field_correct,
-                pred['id']
-            ))
-            db.connection.commit()
+#         with DatabaseManager() as db:
+#             cursor = db.connection.cursor()
+#             cursor.execute('''
+#                 UPDATE predictions
+#                 SET actual_combination = ?, actual_field = ?, is_correct = ?
+#                 WHERE id = ?
+#             ''', (
+#                 ', '.join(map(str, real_comb)),
+#                 real_field,
+#                 matched_count > 0 and is_field_correct,
+#                 pred['id']
+#             ))
+#             db.connection.commit()
 
-def clean_combination(combination: Union[str, List[int]]) -> List[int]:
-    """Очищает и преобразует комбинацию в список чисел"""
-    if isinstance(combination, str):
-        return [int(x.strip()) for x in combination.split(',') if x.strip().isdigit()]
-    elif isinstance(combination, list):
-        return [int(x) for x in combination]
-    return []
+# def clean_combination(combination: Union[str, List[int]]) -> List[int]:
+#     """Очищает и преобразует комбинацию в список чисел"""
+#     if isinstance(combination, str):
+#         return [int(x.strip()) for x in combination.split(',') if x.strip().isdigit()]
+#     elif isinstance(combination, list):
+#         return [int(x) for x in combination]
+#     return []
 
-def get_last_game() -> Optional[Tuple[int, List[int], int]]:
-    """Возвращает данные последней игры"""
-    with DatabaseManager() as db:
-        cursor = db.connection.cursor()
-        cursor.execute('''
-            SELECT draw_number, combination, field 
-            FROM results 
-            ORDER BY draw_number DESC 
-            LIMIT 1
-        ''')
-        result = cursor.fetchone()
-        if result:
-            return (
-                int(result['draw_number']),
-                [int(x) for x in result['combination'].split(',')],
-                int(result['field'])
-            )
-        return None
+# def get_last_game() -> Optional[Tuple[int, List[int], int]]:
+#     """Возвращает данные последней игры"""
+#     with DatabaseManager() as db:
+#         cursor = db.connection.cursor()
+#         cursor.execute('''
+#             SELECT draw_number, combination, field 
+#             FROM results 
+#             ORDER BY draw_number DESC 
+#             LIMIT 1
+#         ''')
+#         result = cursor.fetchone()
+#         if result:
+#             return (
+#                 int(result['draw_number']),
+#                 [int(x) for x in result['combination'].split(',')],
+#                 int(result['field'])
+#             )
+#         return None
     
-def save_prediction(
-    draw_number: int,
-    predicted_combination: List[int],
-    predicted_field: int,
-    model_name: str
-) -> None:
-    """Сохраняет предсказание в базу данных"""
-    try:
-        with DatabaseManager() as db:
-            cursor = db.connection.cursor()
-            cursor.execute('''
-                INSERT INTO predictions (draw_number, predicted_combination, predicted_field, model_name)
-                VALUES (?, ?, ?, ?)
-            ''', (
-                draw_number,
-                ', '.join(map(str, predicted_combination)),
-                predicted_field,
-                model_name
-            ))
-            db.connection.commit()
-            logger.info(f"Предсказание сохранено: {model_name} для тиража {draw_number}")
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка сохранения предсказания: {e}")
+# def save_prediction(
+#     draw_number: int,
+#     predicted_combination: List[int],
+#     predicted_field: int,
+#     model_name: str
+# ) -> None:
+#     """Сохраняет предсказание в базу данных"""
+#     try:
+#         with DatabaseManager() as db:
+#             cursor = db.connection.cursor()
+#             cursor.execute('''
+#                 INSERT INTO predictions (draw_number, predicted_combination, predicted_field, model_name)
+#                 VALUES (?, ?, ?, ?)
+#             ''', (
+#                 draw_number,
+#                 ', '.join(map(str, predicted_combination)),
+#                 predicted_field,
+#                 model_name
+#             ))
+#             db.connection.commit()
+#             logger.info(f"Предсказание сохранено: {model_name} для тиража {draw_number}")
+#     except sqlite3.Error as e:
+#         logger.error(f"Ошибка сохранения предсказания: {e}")
 
 def set_default_timestamps():
     """Устанавливает значения по умолчанию для временных меток"""

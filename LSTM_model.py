@@ -18,8 +18,7 @@ from tensorflow.keras.callbacks import LambdaCallback, EarlyStopping, ModelCheck
 from tensorflow.keras.regularizers import l2 # type: ignore
 from typing import Dict, List, Tuple, Optional, Any
 import logging
-from config import SEQUENCE_LENGTH, MODEL_INPUT_SHAPE, NUM_CLASSES, NUMBERS_RANGE, COMBINATION_LENGTH
-from config import LOGGING_CONFIG
+from config import LOGGING_CONFIG, BATCH_SIZE, SEQUENCE_LENGTH, MODEL_INPUT_SHAPE, NUM_CLASSES, NUMBERS_RANGE, COMBINATION_LENGTH
 
 # Настройка логгера
 logging.basicConfig(**LOGGING_CONFIG)
@@ -31,29 +30,55 @@ logger = logging.getLogger(__name__)
 # # Менеджер контекста для работы с БД
 # @contextmanager
 
-class ProgressBar:
-    def __init__(self, total, length=50):
-        self.total = total
-        self.length = length
-        self.start_time = time.time()
+# class ProgressBar:
+#     def __init__(self, total, length=50):
+#         self.total = total
+#         self.length = length
+#         self.start_time = time.time()
+#         self.stopped_early = False
     
-    def update(self, epoch):
-        progress = (epoch + 1) / self.total
-        filled = int(self.length * progress)
-        bar = '█' * filled + '-' * (self.length - filled)
-        elapsed = time.time() - self.start_time
-        eta = (elapsed / (epoch + 1)) * (self.total - (epoch + 1))
+#     def update(self, epoch, stopped_early=False):
+#         self.stopped_early = stopped_early
         
-        sys.stdout.write(
-            f"\rОбучение: |{bar}| {int(100 * progress)}% "
-            f"[{epoch + 1}/{self.total}] "
-            f"Осталось: {eta:.1f} сек"
-        )
-        sys.stdout.flush()
+#         # Если обучение остановлено, показываем 100%
+#         if stopped_early:
+#             progress = 1.0
+#             epoch = self.total - 1  # Показываем последнюю эпоху как total
+#         else:
+#             progress = (epoch + 1) / self.total
+        
+#         filled = int(self.length * progress)
+#         bar = '█' * filled + '-' * (self.length - filled)
+#         elapsed = time.time() - self.start_time
+        
+#         # Расчет оставшегося времени
+#         if stopped_early:
+#             eta = 0
+#         elif epoch > 0:
+#             eta = (elapsed / (epoch + 1)) * (self.total - (epoch + 1))
+#         else:
+#             eta = elapsed * (self.total - 1)
+        
+#         status = " (early stop)" if stopped_early else ""
+#         sys.stdout.write(
+#             f"\rОбучение: |{bar}| {int(100 * progress)}% "
+#             f"[{epoch + 1}/{self.total}] "
+#             f"Осталось: {eta:.1f} сек{status}"
+#         )
+#         sys.stdout.flush()
     
-    def close(self):
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+#     def close(self):
+#         if self.stopped_early:
+#             # Показываем полный прогресс при досрочном завершении
+#             bar = '█' * self.length
+#             sys.stdout.write(
+#                 f"\rОбучение: |{bar}| 100% "
+#                 f"[{self.total}/{self.total}] "
+#                 f"Осталось: 0.0 сек (обучение завершено досрочно)\n"
+#             )
+#         else:
+#             sys.stdout.write(" (обучение завершено)\n")
+#         sys.stdout.flush()
 
 class LSTMModel:
     def __init__(self, input_shape: Tuple[int, int] = MODEL_INPUT_SHAPE, num_classes: int = NUM_CLASSES):
@@ -76,29 +101,30 @@ class LSTMModel:
 
     def _build_model(self) -> Model:
         """Строит модель LSTM с правильной архитектурой"""
-        input_layer = Input(shape=MODEL_INPUT_SHAPE)  # (30, 8)
+        input_layer = Input(shape=MODEL_INPUT_SHAPE)
         
-        # Обрабатываем каждую комбинацию из 8 чисел
-        x = Conv1D(32, kernel_size=8, activation='relu')(input_layer)  # (30, 32)
+        # Основная ветвь обработки
+        x = Conv1D(64, kernel_size=8, activation='relu')(input_layer)
         x = BatchNormalization()(x)
         
-        # Основной LSTM слой
-        x = LSTM(256, return_sequences=False,
-                kernel_regularizer=l2(0.01))(x)
+        x = LSTM(512, return_sequences=True, kernel_regularizer=l2(0.01))(x)
+        x = Dropout(0.4)(x)
+        x = LSTM(256, return_sequences=False, kernel_regularizer=l2(0.01))(x)
         x = Dropout(0.3)(x)
         
-        # Выход для поля (1-4)
-        output_field = Dense(64, activation='relu')(x)
-        output_field = Dense(NUM_CLASSES, activation='softmax', 
-                           name='field_output')(output_field)
+        # Ветвь для предсказания поля (1-4)
+        field_branch = Dense(128, activation='relu')(x)
+        field_branch = Dense(64, activation='relu')(field_branch)
+        output_field = Dense(NUM_CLASSES, activation='softmax', name='field_output')(field_branch)
         
-        # Выход для комбинации (8 чисел)
-        output_comb = Dense(8 * NUMBERS_RANGE, activation='softmax')(x)
-        output_comb = Reshape((8, NUMBERS_RANGE), name='comb_output')(output_comb)
+        # Ветвь для предсказания комбинации (8 чисел)
+        comb_branch = Dense(512, activation='relu')(x)
+        comb_output = Dense(8 * NUMBERS_RANGE, activation='softmax')(comb_branch)
+        output_comb = Reshape((8, NUMBERS_RANGE), name='comb_output')(comb_output)
 
         model = Model(inputs=input_layer, outputs=[output_field, output_comb])
         
-        optimizer = Adam(learning_rate=0.0005)
+        optimizer = Adam(learning_rate=0.001)
         model.compile(
             optimizer=optimizer,
             loss={
@@ -114,7 +140,7 @@ class LSTMModel:
 
     def train(self, X_train: np.ndarray, y_field: np.ndarray, 
          y_comb: np.ndarray, epochs: int = 150, 
-         batch_size: int = 64) -> Optional[Dict[str, list]]:
+         batch_size: int = BATCH_SIZE) -> Optional[Dict[str, list]]:
         """Обучение модели с явным указанием режима early stopping"""
         try:
             # Проверка и нормализация данных
@@ -122,9 +148,25 @@ class LSTMModel:
                 logger.error("Нет данных для обучения")
                 return None
                 
-            progress = ProgressBar(total=epochs)  # Инициализируем прогресс-бар    
+            # progress = ProgressBar(total=epochs)  # Инициализируем прогресс-бар    
             X_normalized = (X_train - 1) / 19.0
             
+            # # Добавляем флаг досрочной остановки
+            # early_stop_flag = False
+
+            # def check_early_stop(epoch, logs):
+            #     nonlocal early_stop_flag
+            #     if self.model.stop_training:
+            #         early_stop_flag = True
+            #         progress.update(epoch, stopped_early=True)
+
+            # callbacks = [
+            #     EarlyStopping(monitor='val_comb_output_accuracy', patience=20),
+            #     LambdaCallback(on_epoch_end=lambda epoch, logs: progress.update(epoch)),
+            #     LambdaCallback(on_train_end=lambda logs: progress.close()),
+            #     LambdaCallback(on_epoch_end=check_early_stop)
+            # ]
+
             # Callbacks с явным указанием режима
             callbacks = [
                 EarlyStopping(
@@ -148,8 +190,7 @@ class LSTMModel:
                     mode='min',
                     verbose=0
                 ),
-                LambdaCallback(on_epoch_end=lambda epoch, _: progress.update(epoch))
-            ]
+        ]
             
             # Обучение модели
             history = self.model.fit(
@@ -166,7 +207,8 @@ class LSTMModel:
             )
             
             self.save_model()
-            progress.close()  # Завершаем прогресс-бар
+            # if early_stop_flag:
+            #     progress.update(epochs-1, stopped_early=True)  # Принудительно показываем 100%
             return history.history
                 
         except ValueError as e:
@@ -191,10 +233,6 @@ class LSTMModel:
         except Exception as e:
             logger.error(f"Ошибка сохранения: {str(e)}")
             return False
-                          
-        except Exception as e:
-            logger.error(f"Ошибка обучения: {str(e)}", exc_info=True)
-            return None
 
     def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, float]:
         """Оценивает качество модели"""

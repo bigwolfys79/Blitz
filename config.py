@@ -23,8 +23,8 @@ NUM_CLASSES = 4 # Для поля 1-4
 COMBINATION_LENGTH = 8 # 8 чисел в комбинации
 NUMBERS_RANGE = 20 # Для чисел 1-20
 BATCH_SIZE = 128
-RETRAIN_HOURS = 0      # интервал переобучения в часах (от 0 до 24)
-NEW_DATA_THRESHOLD = 1 # минимальное новых записей для обучения
+RETRAIN_HOURS = 1      # интервал переобучения в часах (от 0 до 24)
+NEW_DATA_THRESHOLD = 20 # минимальное новых записей для обучения
 MODEL_INPUT_SHAPE = (SEQUENCE_LENGTH, COMBINATION_LENGTH)  # Автоматически рассчитывается
 MODEL_SAVE_PATH = os.path.join(BASE_DIR, 'models')  # Путь к директории models
 

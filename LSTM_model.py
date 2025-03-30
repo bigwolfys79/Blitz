@@ -1,5 +1,7 @@
 
 import os
+import sys
+import time
 import numpy as np
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')  # Уровень ERROR и выше
@@ -12,7 +14,7 @@ from tensorflow.keras.models import Sequential, load_model # type: ignore
 from tensorflow.keras import Model # type: ignore
 from tensorflow.keras.layers import Conv1D, Input, Reshape, LSTM, Dense, Dropout, BatchNormalization # type: ignore
 from tensorflow.keras.optimizers import Adam # type: ignore
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau # type: ignore
+from tensorflow.keras.callbacks import LambdaCallback, EarlyStopping, ModelCheckpoint, ReduceLROnPlateau # type: ignore
 from tensorflow.keras.regularizers import l2 # type: ignore
 from typing import Dict, List, Tuple, Optional, Any
 import logging
@@ -28,6 +30,30 @@ logger = logging.getLogger(__name__)
 # from contextlib import contextmanager
 # # Менеджер контекста для работы с БД
 # @contextmanager
+
+class ProgressBar:
+    def __init__(self, total, length=50):
+        self.total = total
+        self.length = length
+        self.start_time = time.time()
+    
+    def update(self, epoch):
+        progress = (epoch + 1) / self.total
+        filled = int(self.length * progress)
+        bar = '█' * filled + '-' * (self.length - filled)
+        elapsed = time.time() - self.start_time
+        eta = (elapsed / (epoch + 1)) * (self.total - (epoch + 1))
+        
+        sys.stdout.write(
+            f"\rОбучение: |{bar}| {int(100 * progress)}% "
+            f"[{epoch + 1}/{self.total}] "
+            f"Осталось: {eta:.1f} сек"
+        )
+        sys.stdout.flush()
+    
+    def close(self):
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 class LSTMModel:
     def __init__(self, input_shape: Tuple[int, int] = MODEL_INPUT_SHAPE, num_classes: int = NUM_CLASSES):
@@ -47,8 +73,6 @@ class LSTMModel:
             logger.error(f"Произошла ошибка: {exc_value}")
         else:
             logger.info("Контекст завершён без ошибок.")
-
-
 
     def _build_model(self) -> Model:
         """Строит модель LSTM с правильной архитектурой"""
@@ -97,7 +121,7 @@ class LSTMModel:
             if len(X_train) == 0:
                 logger.error("Нет данных для обучения")
                 return None
-                
+            progress = ProgressBar(total=epochs)  # Инициализируем прогресс-бар    
             X_normalized = (X_train - 1) / 19.0
             
             # Callbacks с явным указанием режима
@@ -139,6 +163,7 @@ class LSTMModel:
             )
             
             self.save_model()
+            progress.close()  # Завершаем прогресс-бар
             return history.history
             
         except Exception as e:
@@ -155,30 +180,7 @@ class LSTMModel:
         except Exception as e:
             logger.error(f"Ошибка сохранения: {str(e)}")
             return False
-            
-            # Обучение модели
-            history = self.model.fit(
-                X_reshaped,
-                {
-                    'field_output': y_field,
-                    'comb_output': y_comb
-                },
-                epochs=epochs,
-                batch_size=batch_size,
-                validation_split=0.2,
-                callbacks=callbacks,
-                verbose=0  # Изменили на 1 для более подробного вывода
-            )
-            
-            self.save_model()
-            return {
-                'field_accuracy': history.history['field_output_accuracy'],
-                'comb_accuracy': history.history['comb_output_accuracy'],
-                'val_field_accuracy': history.history['val_field_output_accuracy'],
-                'val_comb_accuracy': history.history['val_comb_output_accuracy'],
-                'loss': history.history['loss'],
-                'val_loss': history.history['val_loss']
-            }            
+                          
         except Exception as e:
             logger.error(f"Ошибка обучения: {str(e)}", exc_info=True)
             return None
@@ -200,17 +202,6 @@ class LSTMModel:
         except Exception as e:
             logger.error(f"Ошибка оценки: {str(e)}")
             return {}
-
-    def save_model(self, filename: str = 'lstm_model.keras') -> bool:
-        """Сохраняет модель в файл"""
-        try:
-            path = os.path.join(self.model_dir, filename)
-            self.model.save(path)
-            logger.info(f"Модель сохранена: {path}")
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка сохранения: {str(e)}")
-            return False
 
     def load_model(self, filename: str = 'lstm_model.keras') -> bool:
         """Загружает модель из файла"""

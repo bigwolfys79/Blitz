@@ -188,16 +188,6 @@ class ModelTrainChecker:
                     if "duplicate column name" not in str(e):
                         logger.warning(f"Не удалось добавить столбец {column}: {str(e)}")    
 
-    def _ensure_columns_exist(self, cursor, table_name, columns):
-        """Проверяет существование столбцов и добавляет отсутствующие"""
-        for column in columns:
-            try:
-                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} TEXT")
-                logger.info(f"Добавлен столбец {column} в таблицу {table_name}")
-            except sqlite3.OperationalError as e:
-                if "duplicate column name" not in str(e):
-                    logger.warning(f"Не удалось добавить столбец {column}: {str(e)}")
-
     def _check_should_train(self, cursor) -> Tuple[bool, str]:
         """Проверяет необходимость обучения модели с улучшенной логикой"""
         # 1. Проверяем наличие предыдущего обучения

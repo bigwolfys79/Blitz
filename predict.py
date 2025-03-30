@@ -284,13 +284,35 @@ class LotteryPredictor:
 
 
     def _load_model(self):
+        """Загружает предварительно обученную модель Keras"""
         try:
+            # Проверяем существование файла модели
+            if not os.path.exists(self.model_path):
+                error_msg = (
+                    f"Файл модели не найден по пути: {self.model_path}\n"
+                    "Возможные решения:\n"
+                    "1. Сначала обучите модель, выполнив main.py\n"
+                    "2. Проверьте правильность пути в config.py (MODEL_SAVE_PATH)\n"
+                    "3. Убедитесь, что файл не был удален"
+                )
+                logging.error(error_msg)
+                raise FileNotFoundError(error_msg)
+
+            # Пытаемся загрузить модель
+            logging.info(f"Загрузка модели из {self.model_path}")
             model = tf.keras.models.load_model(self.model_path)
             logging.info("Модель успешно загружена")
             return model
+
+        except tf.errors.OpError as e:
+            error_msg = f"Ошибка загрузки файла модели (возможно поврежден файл): {str(e)}"
+            logging.error(error_msg)
+            raise RuntimeError(error_msg) from e
+
         except Exception as e:
-            logging.error(f"Ошибка загрузки модели: {e}")
-            raise
+            error_msg = f"Непредвиденная ошибка при загрузке модели: {str(e)}"
+            logging.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
 
     def prediction_exists(self, draw_number: int) -> bool:
         """Проверяет, существует ли предсказание для указанного тиража"""
@@ -382,16 +404,6 @@ class LotteryPredictor:
         except Exception as e:
             logging.error(f"Неожиданная ошибка: {e}")
             return False
-
-
-    def _load_model(self):
-            try:
-                model = tf.keras.models.load_model(self.model_path)
-                logging.info("Модель успешно загружена")
-                return model
-            except Exception as e:
-                logging.error(f"Ошибка загрузки модели: {e}")
-                raise
 
     def get_last_combinations(self, limit: int) -> List[List[int]]:
         """Получает последние комбинации из БД"""

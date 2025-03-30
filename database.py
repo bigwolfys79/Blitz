@@ -208,8 +208,87 @@ class DatabaseManager:
                 cursor.execute("PRAGMA foreign_key_check")
                 return True
             except sqlite3.Error:
-                return False                      
-
+                return False
+                                  
+    def create_clean_data(self, force_recreate: bool = False) -> bool:
+        """
+        Инициализирует базу данных
+        :param force_recreate: Принудительно пересоздает БД, если True
+        :return: True, если БД была создана, False если уже существовала
+        """
+        if not force_recreate and self.database_exists():
+            logging.info("База данных уже существует")
+            return False
+            
+        try:
+            # Закрываем соединение перед пересозданием
+            if self._connection:
+                self._connection.close()
+                self._connection = None
+            
+            # Удаляем старый файл БД при необходимости
+            if os.path.exists(self.db_path):
+                os.remove(self.db_path)
+                logging.info(f"Удален старый файл БД: {self.db_path}")
+            
+            # Создаем новое соединение
+            self._connection = sqlite3.connect(self.db_path)
+            self._connection.row_factory = sqlite3.Row
+            
+            cursor = self.connection.cursor()
+            cursor.execute("PRAGMA foreign_keys = ON")
+            
+            # Создаем таблицы
+            cursor.execute("""
+                CREATE TABLE results (
+                    draw_number INTEGER PRIMARY KEY,
+                    combination TEXT NOT NULL,
+                    field INTEGER NOT NULL,
+                    draw_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    date TIMESTAMP,
+                    last_update TIMESTAMP
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE TABLE predictions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    draw_number INTEGER NOT NULL,
+                    model_name TEXT NOT NULL,
+                    predicted_combination TEXT NOT NULL,
+                    predicted_field INTEGER NOT NULL,
+                    actual_combination TEXT,
+                    actual_field INTEGER,
+                    is_correct BOOLEAN,
+                    matched_numbers TEXT,
+                    match_count INTEGER,
+                    checked_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(draw_number) REFERENCES results(draw_number),
+                    UNIQUE(draw_number, model_name)
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE TABLE model_metadata (
+                    model_name TEXT PRIMARY KEY,
+                    last_trained TIMESTAMP,
+                    version TEXT,
+                    parameters TEXT,
+                    performance_metrics TEXT
+                )
+            """)
+            
+            self.connection.commit()
+            logging.info("База данных успешно инициализирована")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Ошибка инициализации БД: {e}")
+            if self._connection:
+                self._connection.rollback()
+            raise             
+    
 def safe_fromisoformat(date_str: str) -> Optional[datetime]:
     """Безопасное преобразование строки в datetime"""
     try:
@@ -563,81 +642,81 @@ def compare_combinations(
     matched_numbers = list(predicted_set & real_set)
     return len(matched_numbers), matched_numbers
 
-def create_clean_data(self, force_recreate: bool = False) -> bool:
-        """
-        Инициализирует базу данных
-        :param force_recreate: Принудительно пересоздает БД, если True
-        :return: True, если БД была создана, False если уже существовала
-        """
-        if not force_recreate and self.database_exists():
-            logging.info("База данных уже существует")
-            return False
+# def create_clean_data(self, force_recreate: bool = False) -> bool:
+#         """
+#         Инициализирует базу данных
+#         :param force_recreate: Принудительно пересоздает БД, если True
+#         :return: True, если БД была создана, False если уже существовала
+#         """
+#         if not force_recreate and self.database_exists():
+#             logging.info("База данных уже существует")
+#             return False
             
-        try:
-            # Закрываем соединение перед пересозданием
-            if self._connection:
-                self._connection.close()
-                self._connection = None
+#         try:
+#             # Закрываем соединение перед пересозданием
+#             if self._connection:
+#                 self._connection.close()
+#                 self._connection = None
             
-            # Удаляем старый файл БД при необходимости
-            if os.path.exists(self.db_path):
-                os.remove(self.db_path)
-                logging.info(f"Удален старый файл БД: {self.db_path}")
+#             # Удаляем старый файл БД при необходимости
+#             if os.path.exists(self.db_path):
+#                 os.remove(self.db_path)
+#                 logging.info(f"Удален старый файл БД: {self.db_path}")
             
-            # Создаем новое соединение
-            self._connection = sqlite3.connect(self.db_path)
-            self._connection.row_factory = sqlite3.Row
+#             # Создаем новое соединение
+#             self._connection = sqlite3.connect(self.db_path)
+#             self._connection.row_factory = sqlite3.Row
             
-            cursor = self.connection.cursor()
-            cursor.execute("PRAGMA foreign_keys = ON")
+#             cursor = self.connection.cursor()
+#             cursor.execute("PRAGMA foreign_keys = ON")
             
-            # Создаем таблицы
-            cursor.execute("""
-                CREATE TABLE results (
-                    draw_number INTEGER PRIMARY KEY,
-                    combination TEXT NOT NULL,
-                    field INTEGER NOT NULL,
-                    draw_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    date TIMESTAMP,
-                    last_update TIMESTAMP
-                )
-            """)
+#             # Создаем таблицы
+#             cursor.execute("""
+#                 CREATE TABLE results (
+#                     draw_number INTEGER PRIMARY KEY,
+#                     combination TEXT NOT NULL,
+#                     field INTEGER NOT NULL,
+#                     draw_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+#                     date TIMESTAMP,
+#                     last_update TIMESTAMP
+#                 )
+#             """)
             
-            cursor.execute("""
-                CREATE TABLE predictions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    draw_number INTEGER NOT NULL,
-                    model_name TEXT NOT NULL,
-                    predicted_combination TEXT NOT NULL,
-                    predicted_field INTEGER NOT NULL,
-                    actual_combination TEXT,
-                    actual_field INTEGER,
-                    is_correct BOOLEAN,
-                    matched_numbers TEXT,
-                    match_count INTEGER,
-                    checked_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(draw_number) REFERENCES results(draw_number),
-                    UNIQUE(draw_number, model_name)
-                )
-            """)
+#             cursor.execute("""
+#                 CREATE TABLE predictions (
+#                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+#                     draw_number INTEGER NOT NULL,
+#                     model_name TEXT NOT NULL,
+#                     predicted_combination TEXT NOT NULL,
+#                     predicted_field INTEGER NOT NULL,
+#                     actual_combination TEXT,
+#                     actual_field INTEGER,
+#                     is_correct BOOLEAN,
+#                     matched_numbers TEXT,
+#                     match_count INTEGER,
+#                     checked_at TIMESTAMP,
+#                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+#                     FOREIGN KEY(draw_number) REFERENCES results(draw_number),
+#                     UNIQUE(draw_number, model_name)
+#                 )
+#             """)
             
-            cursor.execute("""
-                CREATE TABLE model_metadata (
-                    model_name TEXT PRIMARY KEY,
-                    last_trained TIMESTAMP,
-                    version TEXT,
-                    parameters TEXT,
-                    performance_metrics TEXT
-                )
-            """)
+#             cursor.execute("""
+#                 CREATE TABLE model_metadata (
+#                     model_name TEXT PRIMARY KEY,
+#                     last_trained TIMESTAMP,
+#                     version TEXT,
+#                     parameters TEXT,
+#                     performance_metrics TEXT
+#                 )
+#             """)
             
-            self.connection.commit()
-            logging.info("База данных успешно инициализирована")
-            return True
+#             self.connection.commit()
+#             logging.info("База данных успешно инициализирована")
+#             return True
             
-        except Exception as e:
-            logging.error(f"Ошибка инициализации БД: {e}")
-            if self._connection:
-                self._connection.rollback()
-            raise                         
+#         except Exception as e:
+#             logging.error(f"Ошибка инициализации БД: {e}")
+#             if self._connection:
+#                 self._connection.rollback()
+#             raise                         

@@ -121,6 +121,7 @@ class LSTMModel:
             if len(X_train) == 0:
                 logger.error("Нет данных для обучения")
                 return None
+                
             progress = ProgressBar(total=epochs)  # Инициализируем прогресс-бар    
             X_normalized = (X_train - 1) / 19.0
             
@@ -130,25 +131,27 @@ class LSTMModel:
                     monitor='val_comb_output_accuracy',
                     patience=20,
                     restore_best_weights=True,
-                    mode='max',  # Явно указываем максимизацию точности
+                    mode='max',
                     verbose=0
                 ),
                 ModelCheckpoint(
                     os.path.join(self.model_dir, 'best_lstm_model.keras'),
                     monitor='val_comb_output_accuracy',
                     save_best_only=True,
-                    mode='max',  # Аналогично для сохранения лучшей модели
+                    mode='max',
                     verbose=0
                 ),
                 ReduceLROnPlateau(
                     monitor='val_loss',
                     factor=0.5,
                     patience=10,
-                    mode='min',  # Для loss минимизируем
+                    mode='min',
                     verbose=0
-                )
+                ),
+                LambdaCallback(on_epoch_end=lambda epoch, _: progress.update(epoch))
             ]
             
+            # Обучение модели
             history = self.model.fit(
                 X_normalized,
                 {
@@ -165,9 +168,17 @@ class LSTMModel:
             self.save_model()
             progress.close()  # Завершаем прогресс-бар
             return history.history
+                
+        except ValueError as e:
+            logger.error(f"Ошибка в данных: {str(e)}", exc_info=True)
+            return None
+            
+        except tf.errors.ResourceExhaustedError as e:
+            logger.error(f"Недостаточно памяти GPU: {str(e)}", exc_info=True)
+            return None
             
         except Exception as e:
-            logger.error(f"Ошибка обучения: {str(e)}", exc_info=True)
+            logger.error(f"Критическая ошибка обучения: {str(e)}", exc_info=True)
             return None
 
     def save_model(self, filename: str = 'lstm_model.keras') -> bool:

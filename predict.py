@@ -467,71 +467,71 @@ class LotteryPredictor:
             raise PredictionError(f"Ошибка предсказания: {str(e)}")
 
 
-    def _predict_field(self, sequences: List[List[int]]) -> int:
-        """
-        Предсказывает номер поля (гарантированно 1-4)
+    # def _predict_field(self, sequences: List[List[int]]) -> int:
+    #     """
+    #     Предсказывает номер поля (гарантированно 1-4)
         
-        Returns:
-            int: Номер поля (всегда 1, 2, 3 или 4)
-        """
-        try:
-            # Подготовка данных
-            sequences = sequences[:self.sequence_length]
-            X = np.array([(num - 1)/19 for seq in sequences for num in seq])
-            X = X.reshape(1, self.sequence_length, self.combination_length)
-            X = X[:, :, 0].reshape(1, self.sequence_length, 1)
+    #     Returns:
+    #         int: Номер поля (всегда 1, 2, 3 или 4)
+    #     """
+    #     try:
+    #         # Подготовка данных
+    #         sequences = sequences[:self.sequence_length]
+    #         X = np.array([(num - 1)/19 for seq in sequences for num in seq])
+    #         X = X.reshape(1, self.sequence_length, self.combination_length)
+    #         X = X[:, :, 0].reshape(1, self.sequence_length, 1)
             
-            # Предсказание
-            field_probs = self.model.predict(X, verbose=0)[0]
-            field = int(np.argmax(field_probs)) + 1  # Явное преобразование в int
+    #         # Предсказание
+    #         field_probs = self.model.predict(X, verbose=0)[0]
+    #         field = int(np.argmax(field_probs)) + 1  # Явное преобразование в int
             
-            # Гарантируем корректный диапазон
-            return max(1, min(4, field))
+    #         # Гарантируем корректный диапазон
+    #         return max(1, min(4, field))
             
-        except Exception as e:
-            logging.error(f"Ошибка предсказания поля: {e}")
-            return 1  # Значение по умолчанию
+    #     except Exception as e:
+    #         logging.error(f"Ошибка предсказания поля: {e}")
+    #         return 1  # Значение по умолчанию
 
-    def load_data_from_db() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Загружает данные из базы данных для обучения моделей"""
-        try:
-            with DatabaseManager() as db:
-                cursor = db.connection.cursor()
-                cursor.execute('SELECT combination, field FROM results ORDER BY draw_number')
-                results = cursor.fetchall()
+    # def load_data_from_db() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    #     """Загружает данные из базы данных для обучения моделей"""
+    #     try:
+    #         with DatabaseManager() as db:
+    #             cursor = db.connection.cursor()
+    #             cursor.execute('SELECT combination, field FROM results ORDER BY draw_number')
+    #             results = cursor.fetchall()
                 
-                if not results:
-                    return np.array([]), np.array([]), np.array([])
+    #             if not results:
+    #                 return np.array([]), np.array([]), np.array([])
                 
-                X = []
-                y_field = []
-                y_comb = []
+    #             X = []
+    #             y_field = []
+    #             y_comb = []
                 
-                for row in results:
-                    try:
-                        comb = [int(x.strip()) for x in row['combination'].split(',')]
-                        if len(comb) != 8:
-                            continue
+    #             for row in results:
+    #                 try:
+    #                     comb = [int(x.strip()) for x in row['combination'].split(',')]
+    #                     if len(comb) != 8:
+    #                         continue
                         
-                        # One-hot кодировка комбинации (8 чисел × 20 вариантов)
-                        comb_encoded = np.zeros((8, 20))
-                        for i, num in enumerate(comb):
-                            if 1 <= num <= 20:
-                                comb_encoded[i, num - 1] = 1
+    #                     # One-hot кодировка комбинации (8 чисел × 20 вариантов)
+    #                     comb_encoded = np.zeros((8, 20))
+    #                     for i, num in enumerate(comb):
+    #                         if 1 <= num <= 20:
+    #                             comb_encoded[i, num - 1] = 1
                         
-                        X.append(comb)
-                        y_field.append(row['field'] - 1)  # Поле 1-4 → 0-3
-                        y_comb.append(comb_encoded)
+    #                     X.append(comb)
+    #                     y_field.append(row['field'] - 1)  # Поле 1-4 → 0-3
+    #                     y_comb.append(comb_encoded)
                         
-                    except (ValueError, AttributeError) as e:
-                        logging.warning(f"Ошибка обработки строки {row}: {str(e)}")
-                        continue
+    #                 except (ValueError, AttributeError) as e:
+    #                     logging.warning(f"Ошибка обработки строки {row}: {str(e)}")
+    #                     continue
                 
-                return np.array(X), np.array(y_field), np.array(y_comb)
+    #             return np.array(X), np.array(y_field), np.array(y_comb)
                 
-        except Exception as e:
-            logging.error(f"Ошибка загрузки данных из БД: {str(e)}", exc_info=True)
-            return np.array([]), np.array([]), np.array([])
+    #     except Exception as e:
+    #         logging.error(f"Ошибка загрузки данных из БД: {str(e)}", exc_info=True)
+    #         return np.array([]), np.array([]), np.array([])
 
 
     def predict_and_save(self) -> bool:

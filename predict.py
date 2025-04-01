@@ -1,18 +1,18 @@
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import numpy as np
-import json
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')  # Уровень ERROR и выше
 tf.autograph.set_verbosity(0)  # Отключаем логи AutoGraph
-
+from datetime import datetime
+DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 # Отключаем прогресс-бары и информационные сообщения
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # 0 = все, 3 = ничего
 tf.keras.utils.disable_interactive_logging()  # Отключает прогресс-бары
 from typing import List, Tuple, Optional
 import sqlite3
 import logging
-from config import MODEL_SAVE_PATH, SEQUENCE_LENGTH, NUM_CLASSES, SEQUENCE_LENGTH
+from config import DATETIME_FORMAT,MODEL_SAVE_PATH, SEQUENCE_LENGTH, NUM_CLASSES, SEQUENCE_LENGTH
 from database import DatabaseManager
 from collections import defaultdict
 
@@ -54,40 +54,8 @@ class LotteryPredictor:
             ''', (draw_number,))
             result = cursor.fetchone()
             return (result['combination'], result['field']) if result else None
-        
-    def _save_training_result(self, result: dict):
-        """Сохраняет результаты обучения одним запросом"""
-        with DatabaseManager() as db:
-            cursor = db.connection.cursor()
-            
-            # Вставка в историю обучения
-            cursor.execute("""
-                INSERT INTO model_training_history 
-                (train_time, data_count, model_version, accuracy, loss, training_duration)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                result['data_count'],
-                result['version'],
-                result.get('accuracy'),
-                result.get('loss'),
-                result.get('duration')
-            ))
-            
-            # Обновление метаданных
-            cursor.execute("""
-                INSERT OR REPLACE INTO model_metadata 
-                (model_name, last_trained, version, performance_metrics)
-                VALUES (?, ?, ?, ?)
-            """, (
-                "lstm_model",
-                result['version'],
-                json.dumps({
-                    'accuracy': result.get('accuracy'),
-                    'loss': result.get('loss')
-                })
-            ))
-            
-            db.connection.commit()    
+     
+ 
 
     def analyze_number_trends(self, last_n_draws=50) -> Tuple[List[int], List[int]]:
         """Анализирует частоту выпадения чисел и возвращает отсортированные по порядку списки"""
@@ -156,22 +124,30 @@ class LotteryPredictor:
             total, correct = cursor.fetchone()
             return f"{correct}/{total} ({(correct/total)*100:.2f}%)" if total > 0 else "Нет данных"              
 
-    def check_last_prediction(self) -> None:
+   
+    def check_last_prediction(self) -> dict:
         """Сравнивает последнее предсказание с фактическими результатами"""
+        result = {
+            'draw_number': 0,
+            'predicted': [],
+            'actual': [],
+            'matched': [],
+            'match_count': 0,
+            'field_match': False,
+            'result_code': '0-0',
+            'is_winning': False,
+            'winning_tier': 'Проигрыш'
+        }
+        
         try:
-            # 1. Обновляем схему БД
-            with DatabaseManager() as db:
-                if not db.update_schema():
-                    logging.error("Не удалось обновить схему БД")
-                    return
+            last_draw = self._get_last_draw_number()
+            if not last_draw:
+                return result
                 
-                # 2. Получаем последний тираж
-                last_draw = self._get_last_draw_number()
-                if not last_draw:
-                    logging.warning("Нет данных о тиражах")
-                    return
+            result['draw_number'] = last_draw
 
-                # 3. Получаем предсказание
+            # Получаем предсказание
+            with DatabaseManager() as db:
                 cursor = db.connection.cursor()
                 cursor.execute('''
                     SELECT predicted_combination, predicted_field 
@@ -181,31 +157,57 @@ class LotteryPredictor:
                 prediction = cursor.fetchone()
                 
                 if not prediction:
-                    logging.info(f"Нет предсказания для тиража {last_draw}")
-                    return
+                    return result
                     
-                pred_comb, pred_field = prediction['predicted_combination'], prediction['predicted_field']
-                pred_numbers = sorted(map(int, pred_comb.split(',')))
+                result['predicted'] = list(map(int, prediction['predicted_combination'].split(',')))
+                result['predicted_field'] = prediction['predicted_field']
 
-            # 4. Получаем фактические результаты
+            # Получаем фактические результаты
             actual_data = self.get_actual_result(last_draw)
             if not actual_data:
-                logging.warning(f"Нет результатов для тиража {last_draw}")
-                return
+                return result
 
-            actual_comb, actual_field = actual_data
-            actual_numbers = sorted(map(int, actual_comb.split(',')))
+            result['actual'] = list(map(int, actual_data[0].split(',')))
+            result['actual_field'] = actual_data[1]
 
-            # 5. Анализ совпадений
-            matched_set = set(pred_numbers) & set(actual_numbers)
-            matched_numbers = sorted(matched_set)
-            num_matched = len(matched_numbers)
-            total_numbers = len(pred_numbers)
-            match_percentage = (num_matched / total_numbers * 100) if total_numbers > 0 else 0
-            field_match = (int(pred_field) == int(actual_field))
-            is_correct = int(num_matched == total_numbers and field_match)
+            # Анализ совпадений
+            matched = set(result['predicted']) & set(result['actual'])
+            result['matched'] = sorted(matched)
+            result['match_count'] = len(matched)
+            result['field_match'] = (result['predicted_field'] == result['actual_field'])
 
-            # 6. Сохраняем результаты
+            # Определение результата
+            winning_combinations = {
+                (8, True): ('8-1', True, "Джекпот (8 чисел + поле)"),
+                (8, False): ('8-0', True, "Главный приз (8 чисел)"),
+                (7, True): ('7-1', True, "Суперприз (7 чисел + поле)"),
+                (7, False): ('7-0', True, "Суперприз (7 чисел)"),
+                (6, True): ('6-1', True, "Крупный выигрыш (6+поле)"),
+                (6, False): ('6-0', True, "Крупный выигрыш (6 чисел)"),
+                (5, True): ('5-1', True, "Большой выигрыш (5+поле)"),
+                (5, False): ('5-0', True, "Большой выигрыш (5 чисел)"),
+                (4, True): ('4-1', True, "Выигрыш (4+поле)"),
+                (0, False): ('0-0', True, "Минимальный выигрыш (ничего не совпало)")
+            }
+            
+            losing_combinations = {
+                (4, False): ('4-0', False, "Проигрыш"),
+                (3, True): ('3-1', False, "Проигрыш"),
+                (3, False): ('3-0', False, "Проигрыш"),
+                (2, True): ('2-1', False, "Проигрыш"),
+                (2, False): ('2-0', False, "Проигрыш"),
+                (1, True): ('1-1', False, "Проигрыш"),
+                (1, False): ('1-0', False, "Проигрыш"),
+                (0, True): ('0-1', False, "Проигрыш")
+            }
+
+            key = (result['match_count'], result['field_match'])
+            if key in winning_combinations:
+                result.update(zip(['result_code', 'is_winning', 'winning_tier'], winning_combinations[key]))
+            elif key in losing_combinations:
+                result.update(zip(['result_code', 'is_winning', 'winning_tier'], losing_combinations[key]))
+
+            # Сохранение результатов
             with DatabaseManager() as db:
                 cursor = db.connection.cursor()
                 cursor.execute('''
@@ -215,72 +217,193 @@ class LotteryPredictor:
                         is_correct = ?,
                         matched_numbers = ?,
                         match_count = ?,
+                        result_code = ?,
+                        winning_tier = ?,
                         checked_at = CURRENT_TIMESTAMP
                     WHERE draw_number = ?
                 ''', (
-                    actual_comb,
-                    actual_field,
-                    is_correct,
-                    ','.join(map(str, matched_numbers)),
-                    num_matched,
+                    actual_data[0],
+                    actual_data[1],
+                    int(result['is_winning']),
+                    ','.join(map(str, result['matched'])),
+                    result['match_count'],
+                    result['result_code'],
+                    result['winning_tier'],
                     last_draw
                 ))
                 db.connection.commit()
 
-            # 7. Получаем статистику точности
+            # Анализ трендов
+            hot, cold = self.analyze_number_trends()
+            
+            logging.info(f"""
+            Анализ тиража #{last_draw}:
+            ├── Предсказание: {result['predicted']} (поле: {result['predicted_field']})
+            ├── Фактически: {result['actual']} (поле: {result['actual_field']})
+            ├── Совпадений: {result['match_count']} чисел ({result['matched']})
+            ├── Результат: {result['result_code']} ({result['winning_tier']})
+            ├── Статус: {'✅ Выигрыш' if result['is_winning'] else '❌ Проигрыш'}
+            ├── 🔥 Горячие: {', '.join(map(str, hot))}
+            └── ❄️ Холодные: {', '.join(map(str, cold))}
+            """)
+
+        except Exception as e:
+            logging.error(f"Ошибка при проверке предсказания: {e}", exc_info=True)
+        
+        return result
+        
+    
+
+    def get_performance_statistics(self, days: int = None) -> dict:
+        """Возвращает статистику эффективности предсказаний за указанный период"""
+        if days is None:
+            from config import REPORT_PERIOD_DAYS
+            days = REPORT_PERIOD_DAYS
+
+        stats = {
+            'total_predictions': 0,
+            'winning_predictions': 0,
+            'winning_rate': 0.0,
+            'winning_tiers': {
+                "8-1 (полное совпадение)": 0,
+                "8-0 (все числа, не поле)": 0,
+                "7-1 (7 чисел + поле)": 0,
+                "7-0 (7 чисел)": 0,
+                "6-1 (6 чисел + поле)": 0,
+                "6-0 (6 чисел)": 0,
+                "5-1 (5 чисел + поле)": 0,
+                "5-0 (5 чисел)": 0,
+                "4-1 (4 числа + поле)": 0,
+                "0-0 (0 чисел)": 0,
+                "проигрыш": 0
+            },
+            'average_match_count': 0.0,
+            'field_accuracy': 0.0
+        }
+        
+        try:
             with DatabaseManager() as db:
                 cursor = db.connection.cursor()
                 
-                # Общая точность
-                cursor.execute('''
+                # 1. Получаем общую статистику
+                cursor.execute(f'''
                     SELECT 
                         COUNT(*) as total,
-                        SUM(is_correct) as correct
-                    FROM predictions
+                        SUM(CASE WHEN result_code IN ('8-1', '8-0', '7-1', '7-0', '6-1', '6-0', '5-1', '5-0', '4-1', '0-0') THEN 1 ELSE 0 END) as wins,
+                        AVG(match_count) as avg_matches,
+                        AVG(CASE WHEN predicted_field = actual_field THEN 1 ELSE 0 END) as field_acc
+                    FROM predictions 
                     WHERE actual_combination IS NOT NULL
+                    AND date(checked_at) >= date('now', '-{days} days')
                 ''')
-                stats = cursor.fetchone()
-                total = stats['total'] if stats else 0
-                correct = stats['correct'] if stats else 0
-                accuracy = f"{correct}/{total} ({(correct/total)*100:.1f}%)" if total > 0 else "Нет данных"
                 
-                # Недельная точность
-                cursor.execute('''
+                row = cursor.fetchone()
+                if row:
+                    stats['total_predictions'] = row['total'] or 0
+                    stats['winning_predictions'] = row['wins'] or 0
+                    stats['average_match_count'] = round(float(row['avg_matches'] or 0), 1)
+                    stats['field_accuracy'] = round(float(row['field_acc'] or 0) * 100, 1)
+                    
+                    if stats['total_predictions'] > 0:
+                        stats['winning_rate'] = round(
+                            (stats['winning_predictions'] / stats['total_predictions']) * 100, 2
+                        )
+                
+                # 2. Получаем детальное распределение результатов
+                cursor.execute(f'''
                     SELECT 
-                        COUNT(*) as total,
-                        SUM(is_correct) as correct
+                        result_code,
+                        COUNT(*) as count
                     FROM predictions
-                    WHERE actual_combination IS NOT NULL
-                    AND date(created_at) >= date('now', '-7 days')
+                    WHERE result_code IS NOT NULL
+                    AND actual_combination IS NOT NULL
+                    AND date(checked_at) >= date('now', '-{days} days')
+                    GROUP BY result_code
                 ''')
-                weekly_stats = cursor.fetchone()
-                weekly_total = weekly_stats['total'] if weekly_stats else 0
-                weekly_correct = weekly_stats['correct'] if weekly_stats else 0
-                weekly_accuracy = f"{weekly_correct}/{weekly_total} ({(weekly_correct/weekly_total)*100:.1f}%)" if weekly_total > 0 else "Нет данных"
-
-            # 8. Анализ трендов
-            hot_numbers, cold_numbers = self.analyze_number_trends()
-
-            # 9. Форматированный вывод
-            logging.info(f"""
-            🔍 Анализ тиража #{last_draw}
-            ├── Предсказание: [{' '.join(map(str, pred_numbers))}] (поле: {pred_field})
-            ├── Результат:    [{' '.join(map(str, actual_numbers))}] (поле: {actual_field})
-            ├── Совпадения:   [{' '.join(map(str, matched_numbers))}] ({num_matched}/{total_numbers} = {match_percentage:.1f}%)
-            ├── Поле:        {'✅ Совпало' if field_match else '❌ Не совпало'}
-            ├── Результат:   {'🎯 Полное совпадение' if is_correct else '🔻 Частичное совпадение'}
-            ├── Точность:    {accuracy}
-            ├── 📊 Недельная: {weekly_accuracy}
-            ├── 🔥 Горячие:  {', '.join(map(str, hot_numbers))}
-            └── ❄️ Холодные: {', '.join(map(str, cold_numbers))}
-            """)
-
-        except sqlite3.Error as e:
-            logging.error(f"Ошибка базы данных при проверке предсказания: {e}")
-        except ValueError as e:
-            logging.error(f"Ошибка формата данных: {e}")
+                
+                # Словарь для преобразования кодов в читаемые названия
+                code_to_tier = {
+                    '8-1': "8-1 (полное совпадение)",
+                    '8-0': "8-0 (все числа, не поле)",
+                    '7-1': "7-1 (7 чисел + поле)",
+                    '7-0': "7-0 (7 чисел)",
+                    '6-1': "6-1 (6 чисел + поле)",
+                    '6-0': "6-0 (6 чисел)",
+                    '5-1': "5-1 (5 чисел + поле)",
+                    '5-0': "5-0 (5 чисел)",
+                    '4-1': "4-1 (4 числа + поле)",
+                    '0-0': "0-0 (0 чисел)"
+                }
+                
+                for row in cursor.fetchall():
+                    result_code = row['result_code']
+                    count = row['count'] or 0
+                    
+                    if result_code in code_to_tier:
+                        stats['winning_tiers'][code_to_tier[result_code]] = count
+                    else:
+                        stats['winning_tiers']["проигрыш"] += count
+        
         except Exception as e:
-            logging.error(f"Критическая ошибка при проверке: {e}", exc_info=True)
+            logging.error(f"Ошибка получения статистики: {e}", exc_info=True)
+        
+        return stats
+
+      
+    def generate_performance_report(self, days: int = None) -> str:
+        """Генерирует текстовый отчет об эффективности предсказаний"""
+        if days is None:
+            from config import REPORT_PERIOD_DAYS
+            days = REPORT_PERIOD_DAYS
+
+        stats = self.get_performance_statistics(days)
+        
+        # Определяем точные ширины колонок
+        left_width = 24  # Ширина левой колонки (названия)
+        left_width1 = 15
+        right_width = 10  # Ширина правой колонки (значения)
+        box_width = left_width + right_width + 3  # +3 для границ и пробелов
+        
+        # Формируем верхнюю часть отчета
+        report_lines = [
+            f"\n{'📊 ОТЧЕТ ЭФФЕКТИВНОСТИ 📊':^{box_width}}",
+            f"╔{'═' * (box_width-2)}╗",
+            f"║ {'Период:':<{left_width1}} {f'последние {days} дней':<{right_width}}",
+            f"║ {'Всего проверено:':<{left_width}} {stats['total_predictions']:<{right_width}}",
+            f"║ {'Выигрышных:':<{left_width}} {f"{stats['winning_predictions']} ({stats['winning_rate']:.2f}%)":<{right_width}}",
+            f"║ {'Среднее совпадений:':<{left_width}} {f"{stats['average_match_count']:.1f}/8":<{right_width}}",
+            f"║ {'Точность поля:':<{left_width}} {f"{stats['field_accuracy']:.1f}%":<{right_width}}",
+            f"╠{'═' * (box_width-2)}╣",
+            f"║ {'Распределение результатов:':<{box_width-3}} "
+        ]
+        
+        # Добавляем распределение результатов
+        result_distribution = [
+            "8-1 (полное совпадение)",
+            "8-0 (все числа, не поле)",
+            "7-1 (7 чисел + поле)",
+            "7-0 (7 чисел)",
+            "6-1 (6 чисел + поле)",
+            "6-0 (6 чисел)",
+            "5-1 (5 чисел + поле)",
+            "5-0 (5 чисел)",
+            "4-1 (4 числа + поле)",
+            "0-0 (0 чисел)",
+            "проигрыш"
+        ]
+        
+        for result in result_distribution:
+            count = stats['winning_tiers'].get(result, 0)
+            report_lines.append(f"║ {result:<{left_width}} {count:^{right_width}}")
+
+        # Закрываем отчет
+        report_lines.append(f"└{'─' * (box_width-2)}┘")
+        
+        # Собираем все строки в один отчет
+        report = "\n".join(report_lines)
+        
+        logging.info(report)
+        return report
 
 
     def _load_model(self):
@@ -384,11 +507,12 @@ class LotteryPredictor:
                     logging.info(f"Обновлено предсказание для тиража {draw_number}")
                 else:
                     # Создаем новое предсказание
+                    current_time = datetime.now().strftime(DATETIME_FORMAT)
                     cursor.execute('''
                         INSERT INTO predictions 
                         (draw_number, predicted_combination, predicted_field, model_name, created_at)
-                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ''', (draw_number, comb_str, field, self.model_name))
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (draw_number, comb_str, field, self.model_name, current_time))
                     logging.info(f"Создано предсказание для тиража {draw_number}")
                 
                 db.connection.commit()
@@ -465,74 +589,7 @@ class LotteryPredictor:
         except Exception as e:
             logging.error(f"Ошибка предсказания: {str(e)}", exc_info=True)
             raise PredictionError(f"Ошибка предсказания: {str(e)}")
-
-
-    # def _predict_field(self, sequences: List[List[int]]) -> int:
-    #     """
-    #     Предсказывает номер поля (гарантированно 1-4)
-        
-    #     Returns:
-    #         int: Номер поля (всегда 1, 2, 3 или 4)
-    #     """
-    #     try:
-    #         # Подготовка данных
-    #         sequences = sequences[:self.sequence_length]
-    #         X = np.array([(num - 1)/19 for seq in sequences for num in seq])
-    #         X = X.reshape(1, self.sequence_length, self.combination_length)
-    #         X = X[:, :, 0].reshape(1, self.sequence_length, 1)
-            
-    #         # Предсказание
-    #         field_probs = self.model.predict(X, verbose=0)[0]
-    #         field = int(np.argmax(field_probs)) + 1  # Явное преобразование в int
-            
-    #         # Гарантируем корректный диапазон
-    #         return max(1, min(4, field))
-            
-    #     except Exception as e:
-    #         logging.error(f"Ошибка предсказания поля: {e}")
-    #         return 1  # Значение по умолчанию
-
-    # def load_data_from_db() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    #     """Загружает данные из базы данных для обучения моделей"""
-    #     try:
-    #         with DatabaseManager() as db:
-    #             cursor = db.connection.cursor()
-    #             cursor.execute('SELECT combination, field FROM results ORDER BY draw_number')
-    #             results = cursor.fetchall()
-                
-    #             if not results:
-    #                 return np.array([]), np.array([]), np.array([])
-                
-    #             X = []
-    #             y_field = []
-    #             y_comb = []
-                
-    #             for row in results:
-    #                 try:
-    #                     comb = [int(x.strip()) for x in row['combination'].split(',')]
-    #                     if len(comb) != 8:
-    #                         continue
-                        
-    #                     # One-hot кодировка комбинации (8 чисел × 20 вариантов)
-    #                     comb_encoded = np.zeros((8, 20))
-    #                     for i, num in enumerate(comb):
-    #                         if 1 <= num <= 20:
-    #                             comb_encoded[i, num - 1] = 1
-                        
-    #                     X.append(comb)
-    #                     y_field.append(row['field'] - 1)  # Поле 1-4 → 0-3
-    #                     y_comb.append(comb_encoded)
-                        
-    #                 except (ValueError, AttributeError) as e:
-    #                     logging.warning(f"Ошибка обработки строки {row}: {str(e)}")
-    #                     continue
-                
-    #             return np.array(X), np.array(y_field), np.array(y_comb)
-                
-    #     except Exception as e:
-    #         logging.error(f"Ошибка загрузки данных из БД: {str(e)}", exc_info=True)
-    #         return np.array([]), np.array([]), np.array([])
-
+ 
 
     def predict_and_save(self) -> bool:
         """Выполняет предсказание и сохраняет результат

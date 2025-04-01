@@ -1,7 +1,8 @@
 
 import os
-import sys
-import time
+import sqlite3
+import json
+from datetime import datetime
 import numpy as np
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')  # Уровень ERROR и выше
@@ -10,75 +11,21 @@ tf.autograph.set_verbosity(0)  # Отключаем логи AutoGraph
 # Отключаем прогресс-бары и информационные сообщения
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # 0 = все, 3 = ничего
 tf.keras.utils.disable_interactive_logging()  # Отключает прогресс-бары
-from tensorflow.keras.models import Sequential, load_model # type: ignore
+from tensorflow.keras.models import load_model # type: ignore
 from tensorflow.keras import Model # type: ignore
 from tensorflow.keras.layers import Conv1D, Input, Reshape, LSTM, Dense, Dropout, BatchNormalization # type: ignore
 from tensorflow.keras.optimizers import Adam # type: ignore
-from tensorflow.keras.callbacks import LambdaCallback, EarlyStopping, ModelCheckpoint, ReduceLROnPlateau # type: ignore
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau # type: ignore
 from tensorflow.keras.regularizers import l2 # type: ignore
 from typing import Dict, List, Tuple, Optional, Any
 import logging
-from config import LOGGING_CONFIG, BATCH_SIZE, SEQUENCE_LENGTH, MODEL_INPUT_SHAPE, NUM_CLASSES, NUMBERS_RANGE, COMBINATION_LENGTH
+from config import DATETIME_FORMAT, LOGGING_CONFIG, BATCH_SIZE, MODEL_INPUT_SHAPE, NUM_CLASSES, NUMBERS_RANGE, COMBINATION_LENGTH
 
 # Настройка логгера
 logging.basicConfig(**LOGGING_CONFIG)
-import joblib
 from sklearn.metrics import classification_report
 
 logger = logging.getLogger(__name__)
-# from contextlib import contextmanager
-# # Менеджер контекста для работы с БД
-# @contextmanager
-
-# class ProgressBar:
-#     def __init__(self, total, length=50):
-#         self.total = total
-#         self.length = length
-#         self.start_time = time.time()
-#         self.stopped_early = False
-    
-#     def update(self, epoch, stopped_early=False):
-#         self.stopped_early = stopped_early
-        
-#         # Если обучение остановлено, показываем 100%
-#         if stopped_early:
-#             progress = 1.0
-#             epoch = self.total - 1  # Показываем последнюю эпоху как total
-#         else:
-#             progress = (epoch + 1) / self.total
-        
-#         filled = int(self.length * progress)
-#         bar = '█' * filled + '-' * (self.length - filled)
-#         elapsed = time.time() - self.start_time
-        
-#         # Расчет оставшегося времени
-#         if stopped_early:
-#             eta = 0
-#         elif epoch > 0:
-#             eta = (elapsed / (epoch + 1)) * (self.total - (epoch + 1))
-#         else:
-#             eta = elapsed * (self.total - 1)
-        
-#         status = " (early stop)" if stopped_early else ""
-#         sys.stdout.write(
-#             f"\rОбучение: |{bar}| {int(100 * progress)}% "
-#             f"[{epoch + 1}/{self.total}] "
-#             f"Осталось: {eta:.1f} сек{status}"
-#         )
-#         sys.stdout.flush()
-    
-#     def close(self):
-#         if self.stopped_early:
-#             # Показываем полный прогресс при досрочном завершении
-#             bar = '█' * self.length
-#             sys.stdout.write(
-#                 f"\rОбучение: |{bar}| 100% "
-#                 f"[{self.total}/{self.total}] "
-#                 f"Осталось: 0.0 сек (обучение завершено досрочно)\n"
-#             )
-#         else:
-#             sys.stdout.write(" (обучение завершено)\n")
-#         sys.stdout.flush()
 
 class LSTMModel:
     def __init__(self, input_shape: Tuple[int, int] = MODEL_INPUT_SHAPE, num_classes: int = NUM_CLASSES):
@@ -147,25 +94,8 @@ class LSTMModel:
             if len(X_train) == 0:
                 logger.error("Нет данных для обучения")
                 return None
-                
-            # progress = ProgressBar(total=epochs)  # Инициализируем прогресс-бар    
+
             X_normalized = (X_train - 1) / 19.0
-            
-            # # Добавляем флаг досрочной остановки
-            # early_stop_flag = False
-
-            # def check_early_stop(epoch, logs):
-            #     nonlocal early_stop_flag
-            #     if self.model.stop_training:
-            #         early_stop_flag = True
-            #         progress.update(epoch, stopped_early=True)
-
-            # callbacks = [
-            #     EarlyStopping(monitor='val_comb_output_accuracy', patience=20),
-            #     LambdaCallback(on_epoch_end=lambda epoch, logs: progress.update(epoch)),
-            #     LambdaCallback(on_train_end=lambda logs: progress.close()),
-            #     LambdaCallback(on_epoch_end=check_early_stop)
-            # ]
 
             # Callbacks с явным указанием режима
             callbacks = [
@@ -207,8 +137,6 @@ class LSTMModel:
             )
             
             self.save_model()
-            # if early_stop_flag:
-            #     progress.update(epochs-1, stopped_early=True)  # Принудительно показываем 100%
             return history.history
                 
         except ValueError as e:
@@ -279,8 +207,8 @@ class LSTMModel:
         return True
 
 
-def train_and_save_model(data: dict) -> dict:
-    """Обучает модель LSTM и сохраняет её"""
+def train_and_save_model(data: dict, db_conn=None) -> dict:
+    """Обучает модель LSTM и сохраняет её, обновляет метаданные в БД"""
     try:
         model = LSTMModel()
         
@@ -295,6 +223,7 @@ def train_and_save_model(data: dict) -> dict:
         X_train = data['X_train']
         y_field = data['y_field']
         y_comb = data['y_comb']
+        last_draw_number = data.get('last_draw_number')
         
         if len(X_train) < 100:
             return {
@@ -311,12 +240,112 @@ def train_and_save_model(data: dict) -> dict:
                 'message': 'Ошибка во время обучения модели'
             }
         
+        # Получаем метрики
+        field_accuracy = history.get('val_field_accuracy', [0])[-1]
+        comb_accuracy = history.get('val_comb_accuracy', [0])[-1]
+        loss = history.get('val_loss', [0])[-1]
+        
+        # Обновляем данные в БД если передан connection
+        if db_conn:
+            try:
+                cursor = db_conn.cursor()
+                current_time = datetime.now().strftime(DATETIME_FORMAT)
+                
+                # 1. Получаем количество данных и время последних данных
+                cursor.execute("SELECT COUNT(*) FROM results")
+                total_data = cursor.fetchone()[0]
+                
+                # Определяем столбец для времени
+                cursor.execute("PRAGMA table_info(results)")
+                columns = [col[1] for col in cursor.fetchall()]
+                time_column = 'created_at' if 'created_at' in columns else 'draw_date'
+                
+                # Получаем время последних данных
+                if last_draw_number:
+                    cursor.execute(f"""
+                        SELECT {time_column} FROM results 
+                        WHERE draw_number = ? 
+                        LIMIT 1
+                    """, (last_draw_number,))
+                    last_data_time = cursor.fetchone()[0] or current_time
+                else:
+                    last_data_time = current_time
+                
+                # 2. Считаем новые данные с момента последнего обучения
+                new_data_count = 0
+                cursor.execute("SELECT MAX(train_time) FROM model_training_history")
+                last_train_result = cursor.fetchone()
+                
+                if last_train_result and last_train_result[0]:
+                    try:
+                        cursor.execute(f"""
+                            SELECT COUNT(*) FROM results 
+                            WHERE {time_column} > ?
+                        """, (last_train_result[0],))
+                        new_data_count = cursor.fetchone()[0]
+                    except sqlite3.Error:
+                        new_data_count = 0
+                
+                # 3. Получаем следующую версию модели
+                cursor.execute("""
+                    SELECT version FROM model_metadata 
+                    WHERE model_name = 'lstm_model' 
+                    ORDER BY last_trained DESC LIMIT 1
+                """)
+                last_version = cursor.fetchone()
+                version = "1.0" if not last_version else f"{float(last_version[0]) + 0.1:.1f}"
+                
+                # 4. Вставляем в model_training_history
+                cursor.execute("""
+                    INSERT INTO model_training_history 
+                    (train_time, data_count, new_data_count, model_version, 
+                    accuracy, last_data_time, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    current_time, 
+                    total_data,
+                    new_data_count,
+                    version,
+                    comb_accuracy, 
+                    last_data_time, 
+                    current_time
+                ))
+                
+                # 5. Обновляем model_metadata
+                cursor.execute("""
+                    INSERT OR REPLACE INTO model_metadata 
+                    (model_name, version, performance_metrics, 
+                    last_data_time, updated_at, last_trained,
+                    total_data_count, new_data_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    "lstm_model",
+                    version,
+                    json.dumps({
+                        'field_accuracy': field_accuracy,
+                        'comb_accuracy': comb_accuracy,
+                        'loss': loss
+                    }),
+                    last_data_time,
+                    current_time,
+                    current_time,
+                    total_data,
+                    new_data_count
+                ))
+                
+                db_conn.commit()
+                logger.info("Данные обучения успешно сохранены в БД")
+            except Exception as e:
+                logger.error(f"Ошибка при обновлении БД: {str(e)}")
+                if db_conn:
+                    db_conn.rollback()
+        
         return {
             'success': True,
             'data_count': len(X_train),
-            'field_accuracy': history.get('val_field_accuracy', [0])[-1],
-            'comb_accuracy': history.get('val_comb_accuracy', [0])[-1],
-            'loss': history.get('val_loss', [0])[-1],
+            'field_accuracy': field_accuracy,
+            'comb_accuracy': comb_accuracy,
+            'loss': loss,
             'message': 'Модель успешно обучена'
         }
         

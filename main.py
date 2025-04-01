@@ -1,18 +1,36 @@
 import os
+import threading
+import sys
 import time
 import signal
-from config import LOGGING_CONFIG
+from config import REPORT_FREQUENCY, REPORT_PERIOD_DAYS
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
-from logging.handlers import RotatingFileHandler
-
-
 from predict import LotteryPredictor
 from parsing import parse_data
 from LSTM_model import train_and_save_model
 from train_models import ModelTrainChecker
-from database import DatabaseManager, calculate_pages_to_parse
+from database import DatabaseManager
+
+class GracefulExit:
+    stop = False
+    _lock = threading.Lock()
+
+    @classmethod
+    def should_stop(cls):
+        with cls._lock:
+            return cls.stop
+
+    @staticmethod
+    def signal_handler(signal_received, frame):
+        with GracefulExit._lock:
+            if not GracefulExit.stop:
+                logger.info("Получен сигнал завершения (Ctrl+C). Завершаем выполнение...")
+                GracefulExit.stop = True
+            else:
+                logger.warning("Принудительное завершение! (повторное нажатие Ctrl+C)")
+                sys.exit(1)
 
 # Настройка логгера с записью только в файл
 def setup_logging():
@@ -24,7 +42,6 @@ def setup_logging():
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
     
-    # Простой FileHandler с перезаписью
     file_handler = logging.FileHandler(
         filename='logs/script.log',
         mode='w',
@@ -41,14 +58,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_PATH = os.path.join('models', 'best_lstm_model.keras')
 
-class GracefulExit:
-    stop = False
-
-    @staticmethod
-    def signal_handler(signal_received, frame):
-        logger.info("Получен сигнал завершения (Ctrl+C). Завершаем выполнение...")
-        GracefulExit.stop = True
-
+# Регистрируем обработчики сигналов
 signal.signal(signal.SIGINT, GracefulExit.signal_handler)
 signal.signal(signal.SIGTERM, GracefulExit.signal_handler)
 
@@ -77,9 +87,15 @@ class ModelTrainer:
             with DatabaseManager() as db:
                 cursor = db.connection.cursor()
                 try:
+                    if GracefulExit.should_stop():
+                        return False
+
                     should_train, reason = self.checker._check_should_train(cursor)
                     if not should_train:
                         logger.info(f"Обучение не требуется: {reason}")
+                        return False
+
+                    if GracefulExit.should_stop():
                         return False
 
                     training_data = self.checker.get_training_model(cursor, incremental=False)
@@ -87,15 +103,14 @@ class ModelTrainer:
                         logger.error("Не удалось получить данные для обучения")
                         return False
 
-                    model_result = train_and_save_model(training_data)
+                    if GracefulExit.should_stop():
+                        return False
+
+                    model_result = train_and_save_model(training_data, db.connection)
                     if not model_result.get('success', False):
                         logger.error(f"Ошибка обучения: {model_result.get('message', 'Unknown error')}")
                         return False
 
-                    self.checker.update_training_info(
-                        data_count=model_result['data_count'],
-                        accuracy=model_result.get('accuracy')
-                    )
                     db.connection.commit()
                     return True
                 finally:
@@ -126,20 +141,17 @@ def wait_until_next_interval(interval_minutes: int = 5, seconds_offset: int = 30
     wait_seconds = (next_time - now).total_seconds()
     logger.info(f"Следующий запуск в {next_time.strftime('%H:%M:%S')}")
     
-    # Разбиваем ожидание на небольшие интервалы для проверки флага
-    while wait_seconds > 0 and not GracefulExit.stop:
-        time.sleep(min(1, wait_seconds))  # Проверяем каждую секунду
+    while wait_seconds > 0 and not GracefulExit.should_stop():
+        time.sleep(min(1, wait_seconds))
         wait_seconds = (next_time - datetime.now()).total_seconds()
     
-    return next_time if not GracefulExit.stop else None
-
+    return next_time if not GracefulExit.should_stop() else None
 
 def main():
     """Точка входа в приложение."""
     logger.info("=" * 50)
     logger.info("Инициализация приложения")
 
-    # Инициализация и проверка модели
     trainer = ModelTrainer()
     if not trainer.ensure_model_exists():
         logger.critical("Не удалось инициализировать модель! Завершение работы.")
@@ -149,54 +161,59 @@ def main():
     logger.info("Приложение готово к работе")
     logger.info("=" * 50)
 
-    try:
-        while not GracefulExit.stop:
-            cycle_start = datetime.now()
-            logger.info(f"\n{'-'*50}\nЦикл начат: {cycle_start.strftime('%H:%M:%S')}")
+    cycle_counter = 0
 
-            # Проверяем флаг перед каждой операцией
-            if GracefulExit.stop:
-                break
+    try:
+        while not GracefulExit.should_stop():
+            cycle_counter += 1
+            cycle_start = datetime.now()
+            logger.info(f"\n{'-'*83}\nЦикл начат: {cycle_start.strftime('%H:%M:%S')}")
 
             next_run = wait_until_next_interval()
-            if GracefulExit.stop or next_run is None:
+            if GracefulExit.should_stop() or next_run is None:
                 break
 
-            if GracefulExit.stop:
-                break
+            try:
+                with DatabaseManager() as db:
+                    cursor = db.connection.cursor()
+                    try:
+                        if GracefulExit.should_stop():
+                            break
+                        parse_data()
 
-            with DatabaseManager() as db:
+                        if GracefulExit.should_stop():
+                            break
+                        trainer.run_training_cycle()
+
+                        if GracefulExit.should_stop():
+                            break
+                        if predictor.predict_and_save():
+                            predictor.check_last_prediction()
+                    finally:
+                        cursor.close()
+            except Exception as e:
+                logger.error(f"Ошибка в цикле: {e}")
+                if GracefulExit.should_stop():
+                    break
+
+            if cycle_counter % REPORT_FREQUENCY == 0:
                 try:
-                    if GracefulExit.stop:
-                        break
-
-                    # Парсинг данных
-                    pages, _ = calculate_pages_to_parse()
-                    parse_data(pages_to_parse=pages or 1)
-
-                    if GracefulExit.stop:
-                        break
-
-                    # Обучение модели
-                    trainer.run_training_cycle()
-
-                    if GracefulExit.stop:
-                        break
-
-                    # Предсказание
-                    if predictor.predict_and_save():
-                        predictor.check_last_prediction()
-
+                    report = predictor.generate_performance_report(REPORT_PERIOD_DAYS)
                 except Exception as e:
-                    logger.error(f"Ошибка в цикле: {e}")
-                    if GracefulExit.stop:
-                        break
+                    logger.error(f"Ошибка генерации отчета: {e}")
 
             logger.info(f"Цикл завершен за {(datetime.now() - cycle_start).total_seconds():.2f} сек")
 
-    except KeyboardInterrupt:
-        logger.info("Приложение остановлено пользователем")
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка: {e}")
     finally:
+        try:
+            report = predictor.generate_performance_report(30)
+            print(f"\n{' ФИНАЛЬНЫЙ ОТЧЕТ ':=^50}\n{report}\n{'='*50}")
+            logger.info(f"Финальный отчет:\n{report}")
+        except Exception as e:
+            logger.error(f"Ошибка генерации финального отчета: {e}")
+        
         logger.info("Приложение завершено")
 
 if __name__ == "__main__":

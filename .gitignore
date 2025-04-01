@@ -4,3 +4,5 @@ comparison.log
 models/
 script.log
 results.db
+drivers/
+chromedriver-win64/

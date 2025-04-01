@@ -1,19 +1,26 @@
 import os
+import config
 import sqlite3
+from pathlib import Path
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.manager import DriverManager
+from webdriver_manager.core.driver_cache import DriverCacheManager
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from datetime import datetime, timedelta
 import logging
-from config import CHROMEDRIVER_PATH, BASE_URL, LOGGING_CONFIG, TF_CPP_MIN_LOG_LEVEL, TF_ENABLE_ONEDNN_OPTS
+from config import DATETIME_FORMAT, DAYS_TO_PARSE, CHROMEDRIVER_PATH, BASE_URL, LOGGING_CONFIG
+datetime.now().strftime(DATETIME_FORMAT)
 from database import DatabaseManager, save_to_database_batch, safe_fromisoformat
 from database import DatabaseManager
 # Устанавливаем переменные окружения
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = TF_CPP_MIN_LOG_LEVEL
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = TF_ENABLE_ONEDNN_OPTS
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 # Настройка логгера
 logging.basicConfig(**LOGGING_CONFIG)
@@ -26,15 +33,76 @@ def db_session():
         yield db
     finally:
         db.close()
+# def setup_driver():
+#     service = Service(CHROMEDRIVER_PATH)
+#     options = Options()
+#     options.add_argument('--headless')
+#     options.add_argument('--disable-gpu')
+#     options.add_argument('--no-sandbox')
+#     options.add_argument('--log-level=3')
+#     options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+#     options.add_experimental_option('excludeSwitches', ['enable-logging'])
+#     return webdriver.Chrome(service=service, options=options)
 def setup_driver():
-    service = Service(CHROMEDRIVER_PATH)
-    options = Options()
-    options.add_argument('--headless')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--log-level=3')
-    options.add_experimental_option('excludeSwitches', ['enable-logging'])
-    return webdriver.Chrome(service=service, options=options)
+    """Настраивает драйвер с сохранением в папку проекта (для webdriver-manager 4.0+)"""
+    try:
+        # Подготовка папки
+        driver_dir = Path("drivers")
+        driver_dir.mkdir(exist_ok=True)
+        
+        if not config.AUTO_UPDATE_DRIVER:
+            return webdriver.Chrome(service=ChromeService(
+                executable_path=config.CHROMEDRIVER_PATH))
+        
+        # Настройка кеша для сохранения в папку проекта
+        cache_manager = DriverCacheManager(root_dir=str(driver_dir))
+        
+        # Автоматическое управление версиями
+        driver_path = ChromeDriverManager(
+            cache_manager=cache_manager,
+            driver_version=config.DRIVER_VERSION  # None для автоматического определения
+        ).install()
+        
+        # Очистка старых версий (если нужно)
+        clean_old_drivers(driver_dir)
+        
+        # Создаем сервис и драйвер
+        service = ChromeService(executable_path=driver_path)
+        options = webdriver.ChromeOptions()
+        options.add_argument('--headless')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--no-sandbox')
+        
+        return webdriver.Chrome(service=service, options=options)
+        
+    except Exception as e:
+        logging.error(f"Ошибка инициализации драйвера: {str(e)}")
+        raise
+
+def get_chrome_version():
+    """Получаем версию установленного Chrome (Windows)"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                          r"Software\Google\Chrome\BLBeacon") as key:
+            version = winreg.QueryValueEx(key, "version")[0]
+        return version.split('.')[0]  # Возвращаем major версию
+    except Exception as e:
+        logging.warning(f"Не удалось определить версию Chrome: {str(e)}")
+        return None  # Пусть webdriver-manager сам определит версию
+        
+def clean_old_drivers(driver_dir, keep_last=2):
+    """Оставляет только последние 2 версии драйверов"""
+    try:
+        drivers = sorted(Path(driver_dir).glob("chromedriver*"))
+        for old_driver in drivers[:-keep_last]:
+            try:
+                old_driver.unlink()
+            except Exception as e:
+                logging.warning(f"Не удалось удалить {old_driver}: {str(e)}")
+    except Exception as e:
+        logging.warning(f"Ошибка очистки старых драйверов: {str(e)}")
+ 
 
 def get_total_pages(driver, url):
     """
@@ -49,7 +117,7 @@ def get_total_pages(driver, url):
         pages = [int(element.text.strip()) for element in page_elements if element.text.strip().isdigit()]
         return max(pages) if pages else 1
     except Exception as e:
-        logging.error(f'Ошибка при определении количества страниц: {e}')
+        # logging.error(f'Ошибка при определении количества страниц: {e}')
         return 1
 
 def parse_page(driver, url):
@@ -92,58 +160,134 @@ def parse_page(driver, url):
 
 
 
-def parse_data(pages_to_parse=1):
+import logging
+from datetime import datetime, timedelta
+from config import DAYS_TO_PARSE  # Импортируем настройку из config.py
+
+import logging
+from datetime import datetime, timedelta
+from config import DAYS_TO_PARSE  # Импортируем настройку из config.py
+
+def parse_data():
+    """Парсит данные лотереи с учетом времени последнего обновления и настроек"""
     driver = None
     try:
         driver = setup_driver()
-        today = datetime.now().strftime('%Y-%m-%d')
-        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-
-        # Используем единое соединение для всех операций
+        current_time = datetime.now()
+        today = current_time.date()
+        current_hour_minute = current_time.strftime("%H:%M")
+        
         with DatabaseManager() as db:
-            # Получаем информацию о БД
             cursor = db.connection.cursor()
-            cursor.execute("SELECT COUNT(*) FROM results")
-            result = cursor.fetchone()  # Получаем результат один раз
-            total_records = result[0] if result else 0  # Безопасное извлечение
             
-            last_update_time = db.get_last_update_time()
-            last_update_date = None
+            # Проверяем наличие таблицы results
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM sqlite_master 
+                    WHERE type='table' AND name='results'
+                )
+            """)
+            table_exists = cursor.fetchone()[0]
             
-            if last_update_time:
-                try:
-                    if isinstance(last_update_time, str):
-                        last_update_time = safe_fromisoformat(last_update_time)
-                    last_update_date = last_update_time.strftime('%Y-%m-%d')
-                except (AttributeError, ValueError) as e:
-                    logging.warning(f"Ошибка обработки времени обновления: {str(e)}")
-
-            # Определяем параметры парсинга
-            if total_records == 0:
-                logging.info("Обнаружена пустая БД. Запуск полного парсинга...")
-                dates_to_parse = [today, yesterday]
-                total_pages_today = get_total_pages(driver, BASE_URL.format(date=today, page=1))
-                total_pages_yesterday = get_total_pages(driver, BASE_URL.format(date=yesterday, page=1))
+            if not table_exists:
+                logging.error("Таблица results не найдена в базе данных. Завершение работы.")
+                return
+            
+            # Получаем время последнего обновления
+            cursor.execute("SELECT last_update FROM results ORDER BY last_update DESC LIMIT 1")
+            result = cursor.fetchone()
+            last_update = datetime.strptime(result[0], DATETIME_FORMAT) if result else None
+            
+            # Логируем информацию о последнем обновлении
+            if last_update:
+                logging.info(f"Последнее обновление результатов: {last_update.strftime('%Y-%m-%d %H:%M:%S')}")
             else:
-                if last_update_date == today:
-                    logging.info("Последнее обновление было сегодня. Парсим только сегодняшние данные.")
-                    dates_to_parse = [today]
-                    total_pages_today = min(get_total_pages(driver, BASE_URL.format(date=today, page=1)), pages_to_parse)
-                    total_pages_yesterday = 0
+                logging.info("В таблице результатов нет записей (первый запуск или таблица пустая)")
+            
+            # Определяем даты для парсинга
+            if last_update:
+                last_update_date = last_update.date()
+                last_update_time = last_update.time()
+                time_diff = current_time - last_update
+                minutes_diff = time_diff.total_seconds() / 60
+                
+                # Проверяем особый случай: обновление вчера после 23:55 и сейчас до 00:05
+                is_special_case = (
+                    last_update_date == today - timedelta(days=1) and
+                    last_update_time.hour == 23 and last_update_time.minute >= 55 and
+                    current_hour_minute < "00:05"
+                )
+                
+                if is_special_case:
+                    logging.info("Особый случай: обновление вчера после 23:55, сейчас до 00:05")
+                    parse_dates = [last_update_date.strftime('%Y-%m-%d')]
+                    parse_pages = {parse_dates[0]: 1}  # Парсим только 1 страницу за вчера
+                
+                elif last_update_date == today:
+                    # Вычисляем количество страниц (min 1, max 15)
+                    pages_to_parse = max(1, min(15, int(minutes_diff // 95)))
+                    logging.info(f"Разница с последним обновлением: {int(minutes_diff)} минут")
+                    logging.info(f"Будем парсить {pages_to_parse} страниц за сегодня")
+                    
+                    parse_dates = [today.strftime('%Y-%m-%d')]
+                    parse_pages = {parse_dates[0]: pages_to_parse}
+                    
+                elif last_update_date == today - timedelta(days=1):
+                    max_date = today - timedelta(days=DAYS_TO_PARSE)
+                    parse_dates = []
+                    current_date = today
+                    
+                    while current_date >= max_date and current_date >= last_update_date:
+                        parse_dates.append(current_date.strftime('%Y-%m-%d'))
+                        current_date -= timedelta(days=1)
+                    
+                    parse_pages = {date: None for date in parse_dates}
+                    logging.info(f"Будем парсить данные за {len(parse_dates)} дней: с {parse_dates[-1]} по {parse_dates[0]}")
+                    
                 else:
-                    logging.info("Последнее обновление было вчера или раньше. Парсим сегодняшние и вчерашние данные.")
-                    dates_to_parse = [today, yesterday]
-                    total_pages_today = min(get_total_pages(driver, BASE_URL.format(date=today, page=1)), pages_to_parse)
-                    total_pages_yesterday = min(get_total_pages(driver, BASE_URL.format(date=yesterday, page=1)), pages_to_parse)
-
-            # Парсинг данных
-            for parse_date in dates_to_parse:
-                logging.info(f"Обработка данных за {parse_date}...")
+                    max_date = today - timedelta(days=DAYS_TO_PARSE)
+                    parse_dates = []
+                    current_date = today
+                    
+                    while current_date >= max_date:
+                        parse_dates.append(current_date.strftime('%Y-%m-%d'))
+                        current_date -= timedelta(days=1)
+                    
+                    parse_pages = {date: None for date in parse_dates}
+                    days_diff = (today - last_update_date).days
+                    logging.info(f"Последнее обновление было {days_diff} дней назад")
+                    logging.info(f"Будем парсить данные за {DAYS_TO_PARSE} дней: с {parse_dates[-1]} по {parse_dates[0]}")
+            else:
+                max_date = today - timedelta(days=DAYS_TO_PARSE)
+                parse_dates = []
+                current_date = today
+                
+                while current_date >= max_date:
+                    parse_dates.append(current_date.strftime('%Y-%m-%d'))
+                    current_date -= timedelta(days=1)
+                
+                parse_pages = {date: None for date in parse_dates}
+                logging.info(f"Будем парсить данные за {DAYS_TO_PARSE} дней: с {parse_dates[-1]} по {parse_dates[0]}")
+            
+            # Парсинг данных для каждой даты
+            for parse_date in parse_dates:
+                logging.info(f"Обрабатываем данные за {parse_date}...")
                 data_to_insert = []
                 
-                total_pages = total_pages_today if parse_date == today else total_pages_yesterday
-                logging.info(f'Дата: {parse_date}, Всего страниц: {total_pages}')
-
+                try:
+                    total_available_pages = get_total_pages(driver, BASE_URL.format(date=parse_date, page=1))
+                except Exception as e:
+                    logging.error(f"Ошибка при получении количества страниц для даты {parse_date}: {str(e)}")
+                    continue
+                
+                pages_limit = parse_pages.get(parse_date)
+                if pages_limit is not None:
+                    total_pages = min(total_available_pages, pages_limit)
+                    logging.info(f"Ограничение парсинга: {pages_limit} страниц из доступных {total_available_pages}")
+                else:
+                    total_pages = total_available_pages
+                    logging.info(f"Будем парсить все доступные страницы ({total_available_pages})")
+                
                 for page in range(1, total_pages + 1):
                     url = BASE_URL.format(date=parse_date, page=page)
                     try:
@@ -152,29 +296,32 @@ def parse_data(pages_to_parse=1):
                             continue
                             
                         for draw_date, draw_number, combination, field in draw_data:
-                            # Используем текущее соединение для проверки
                             cursor.execute("SELECT 1 FROM results WHERE draw_number = ?", (draw_number,))
                             if not cursor.fetchone():
-                                data_to_insert.append((draw_date, draw_number, combination, field))
+                                now = datetime.now().strftime(DATETIME_FORMAT)
+                                data_to_insert.append((
+                                    draw_date, 
+                                    draw_number, 
+                                    combination, 
+                                    field,
+                                    now,
+                                    now
+                                ))
                     except Exception as e:
                         logging.error(f"Ошибка при парсинге страницы {page} за {parse_date}: {str(e)}", exc_info=True)
                         continue
-
-                # Сохранение данных
+                
                 if data_to_insert:
                     try:
-                        # Используем текущее соединение для вставки
                         cursor.executemany(
-                            "INSERT INTO results (draw_date, draw_number, combination, field) VALUES (?, ?, ?, ?)",
+                            """INSERT INTO results 
+                            (draw_date, draw_number, combination, field, created_at, last_update) 
+                            VALUES (?, ?, ?, ?, ?, ?)""",
                             data_to_insert
                         )
                         db.connection.commit()
-                        logging.info(f'Успешно сохранено {len(data_to_insert)} записей за {parse_date}')
+                        logging.info(f"Добавлено {len(data_to_insert)} новых записей за {parse_date}")
                         
-                        # Обновляем время последнего обновления
-                        if data_to_insert:
-                            last_draw_number = data_to_insert[-1][1]
-                            db.update_last_update_time(last_draw_number)
                     except Exception as e:
                         db.connection.rollback()
                         logging.error(f"Ошибка сохранения данных за {parse_date}: {str(e)}", exc_info=True)
@@ -193,4 +340,4 @@ def is_draw_exists(draw_number):
     with DatabaseManager() as db:
         cursor = db.connection.cursor()
         cursor.execute("SELECT 1 FROM results WHERE draw_number = ?", (draw_number,))
-        return cursor.fetchone() is not None   
+        return cursor.fetchone() is not None

@@ -12,7 +12,7 @@ tf.keras.utils.disable_interactive_logging()  # Отключает прогре�
 from typing import List, Tuple, Optional
 import sqlite3
 import logging
-from config import TRAINING_PARAMS, DATETIME_FORMAT,MODEL_SAVE_PATH, SEQUENCE_LENGTH, NUM_CLASSES, SEQUENCE_LENGTH
+from config import DATETIME_FORMAT,MODEL_SAVE_PATH, SEQUENCE_LENGTH, NUM_CLASSES, SEQUENCE_LENGTH
 from database import DatabaseManager
 from collections import defaultdict
 
@@ -548,25 +548,38 @@ class LotteryPredictor:
             return result[0] if result else 0
 
     def predict_next(self) -> Tuple[int, List[int], int]:
-        """Предсказывает следующий тираж с учетом SEQUENCE_LENGTH"""
+        """Предсказывает следующий тираж с автоматической адаптацией к SEQUENCE_LENGTH"""
         try:
-            # 1. Получаем последние SEQUENCE_LENGTH комбинаций
-            last_combinations = self.get_last_combinations(SEQUENCE_LENGTH)
-            if len(last_combinations) < SEQUENCE_LENGTH:
-                raise ValueError(f"Требуется {SEQUENCE_LENGTH:} комбинаций, получено {len(last_combinations)}")
+            # 1. Получаем ожидаемую длину последовательности из модели
+            expected_seq_length = self.model.input_shape[1]  # Получаем из самой модели
+            
+            # 2. Получаем данные с учетом SEQUENCE_LENGTH из конфига
+            last_combinations = self.get_last_combinations(max(self.sequence_length, expected_seq_length))
+            
+            # 3. Адаптируем данные под требования модели
+            if len(last_combinations) > expected_seq_length:
+                last_combinations = last_combinations[-expected_seq_length:]  # Берем последние N комбинаций
+                logging.info(f"Используются последние {expected_seq_length} комбинаций из {len(last_combinations)} доступных")
+            
+            # 4. Проверка минимального количества данных
+            if len(last_combinations) < expected_seq_length:
+                raise ValueError(
+                    f"Модель требует {expected_seq_length} комбинаций. "
+                    f"Доступно: {len(last_combinations)}. "
+                    f"SEQUENCE_LENGTH в config.py: {self.sequence_length}"
+                )
 
-            # 2. Подготавливаем входные данные (форма: [1, SEQUENCE_LENGTH, COMBINATION_LENGTH])
-            X = np.array([last_combinations[-SEQUENCE_LENGTH:]], dtype=np.float32)  # Обрезка до SEQUENCE_LENGTH
-
+            # 5. Подготовка входных данных
+            X = np.array([last_combinations], dtype=np.float32)  # Форма: (1, N, 8)
             X = (X - 1) / 19  # Нормализация [1-20] -> [0-1]
 
-            # 3. Предсказание модели
+            # 6. Предсказание модели
             field_probs, comb_probs = self.model.predict(X, verbose=0)
 
-            # 4. Обработка предсказанного поля (1-4)
+            # 7. Обработка предсказанного поля (1-4)
             predicted_field = np.argmax(field_probs[0]) + 1
 
-            # 5. Обработка предсказанной комбинации (8 уникальных чисел)
+            # 8. Обработка предсказанной комбинации (8 уникальных чисел)
             predicted_comb = []
             used_numbers = set()
             
@@ -581,15 +594,27 @@ class LotteryPredictor:
                         used_numbers.add(num)
                         break
 
-            # 6. Получаем номер следующего тиража
+            # 9. Получаем номер следующего тиража
             last_draw_num = self._get_last_draw_number()
             next_draw_num = last_draw_num + 1 if last_draw_num else 1
+
+            # Логирование параметров
+            logging.info(
+                f"Параметры предсказания: "
+                f"Модель ожидает {expected_seq_length} последовательностей, "
+                f"использовано {len(last_combinations)}. "
+                f"SEQUENCE_LENGTH в конфиге: {self.sequence_length}"
+            )
 
             return next_draw_num, sorted(predicted_comb), predicted_field
 
         except Exception as e:
             logging.error(f"Ошибка предсказания: {str(e)}", exc_info=True)
-            raise PredictionError(f"Ошибка предсказания: {str(e)}")
+            raise PredictionError(
+                f"Ошибка предсказания: {str(e)}\n"
+                f"Модель ожидает последовательность длины: {self.model.input_shape[1]}\n"
+                f"Текущий SEQUENCE_LENGTH: {self.sequence_length}"
+            )
  
 
     def predict_and_save(self) -> bool:

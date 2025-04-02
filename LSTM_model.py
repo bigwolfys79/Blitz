@@ -13,13 +13,13 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # 0 = все, 3 = ничего
 tf.keras.utils.disable_interactive_logging()  # Отключает прогресс-бары
 from tensorflow.keras.models import load_model # type: ignore
 from tensorflow.keras import Model # type: ignore
-from tensorflow.keras.layers import Bidirectional, Conv1D, Input, Reshape, LSTM, Dense, Dropout, BatchNormalization # type: ignore
+from tensorflow.keras.layers import Conv1D, Input, Reshape, LSTM, Dense, Dropout, BatchNormalization # type: ignore
 from tensorflow.keras.optimizers import Adam # type: ignore
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau # type: ignore
 from tensorflow.keras.regularizers import l2 # type: ignore
 from typing import Dict, List, Tuple, Optional, Any
 import logging
-from config import TRAINING_PARAMS, DATETIME_FORMAT, LOGGING_CONFIG, BATCH_SIZE, MODEL_INPUT_SHAPE, NUM_CLASSES, NUMBERS_RANGE, COMBINATION_LENGTH
+from config import DATETIME_FORMAT, LOGGING_CONFIG, BATCH_SIZE, MODEL_INPUT_SHAPE, NUM_CLASSES, NUMBERS_RANGE, COMBINATION_LENGTH
 
 # Настройка логгера
 logging.basicConfig(**LOGGING_CONFIG)
@@ -33,7 +33,25 @@ class LSTMModel:
         os.makedirs(self.model_dir, exist_ok=True)
         self.input_shape = input_shape
         self.num_classes = num_classes
-        self.model = self._build_model()
+        self.model = self._load_or_rebuild_model()
+
+    def _load_or_rebuild_model(self) -> Model:
+        """Загружает модель или пересоздает если она несовместима с текущими параметрами"""
+        model_path = os.path.join(self.model_dir, 'best_lstm_model.keras')
+        
+        if os.path.exists(model_path):
+            try:
+                model = load_model(model_path)
+                # Проверяем совместимость модели
+                if model.input_shape[1] == self.input_shape[0]:
+                    logger.info("Модель загружена и совместима с текущими параметрами")
+                    return model
+                logger.warning(f"Модель несовместима (ожидалось {self.input_shape}, получено {model.input_shape})")
+            except Exception as e:
+                logger.error(f"Ошибка загрузки модели: {str(e)}")
+        
+        logger.info("Создание новой модели с текущими параметрами")
+        return self._build_model()    
 
     def __enter__(self):
         """Действия при входе в блок `with`"""
@@ -46,73 +64,32 @@ class LSTMModel:
         else:
             logger.info("Контекст завершён без ошибок.")
 
-    # def _build_model(self) -> Model:
-    #     """Строит модель LSTM с правильной архитектурой"""
-    #     input_layer = Input(shape=MODEL_INPUT_SHAPE)
-        
-    #     # Основная ветвь обработки
-    #     x = Conv1D(64, kernel_size=8, activation='relu')(input_layer)
-    #     x = BatchNormalization()(x)
-        
-    #     x = LSTM(512, return_sequences=True, kernel_regularizer=l2(0.01))(x)
-    #     x = Dropout(0.4)(x)
-    #     x = LSTM(256, return_sequences=False, kernel_regularizer=l2(0.01))(x)
-    #     x = Dropout(0.3)(x)
-        
-    #     # Ветвь для предсказания поля (1-4)
-    #     field_branch = Dense(128, activation='relu')(x)
-    #     field_branch = Dense(64, activation='relu')(field_branch)
-    #     output_field = Dense(NUM_CLASSES, activation='softmax', name='field_output')(field_branch)
-        
-    #     # Ветвь для предсказания комбинации (8 чисел)
-    #     comb_branch = Dense(512, activation='relu')(x)
-    #     comb_output = Dense(8 * NUMBERS_RANGE, activation='softmax')(comb_branch)
-    #     output_comb = Reshape((8, NUMBERS_RANGE), name='comb_output')(comb_output)
-
-    #     model = Model(inputs=input_layer, outputs=[output_field, output_comb])
-        
-    #     optimizer = Adam(learning_rate=0.001)
-    #     model.compile(
-    #         optimizer=optimizer,
-    #         loss={
-    #             'field_output': 'sparse_categorical_crossentropy',
-    #             'comb_output': 'categorical_crossentropy'
-    #         },
-    #         metrics={
-    #             'field_output': 'accuracy',
-    #             'comb_output': 'accuracy'
-    #         }
-    #     )
-    #     return model
     def _build_model(self) -> Model:
-        input_layer = Input(shape=self.input_shape)
+        """Строит модель LSTM с правильной архитектурой"""
+        input_layer = Input(shape=MODEL_INPUT_SHAPE)
         
-        # Улучшенная архитектура
-        x = Conv1D(128, kernel_size=3, activation='relu', padding='same')(input_layer)
+        # Основная ветвь обработки
+        x = Conv1D(64, kernel_size=8, activation='relu')(input_layer)
         x = BatchNormalization()(x)
-        x = Dropout(0.2)(x)
         
-        # Двунаправленные LSTM с residual connection
-        lstm1 = Bidirectional(LSTM(256, return_sequences=True))(x)
-        lstm1 = Dropout(0.3)(lstm1)
+        x = LSTM(512, return_sequences=True, kernel_regularizer=l2(0.01))(x)
+        x = Dropout(0.4)(x)
+        x = LSTM(256, return_sequences=False, kernel_regularizer=l2(0.01))(x)
+        x = Dropout(0.3)(x)
         
-        lstm2 = Bidirectional(LSTM(128))(lstm1)
-        lstm2 = Dropout(0.3)(lstm2)
+        # Ветвь для предсказания поля (1-4)
+        field_branch = Dense(128, activation='relu')(x)
+        field_branch = Dense(64, activation='relu')(field_branch)
+        output_field = Dense(NUM_CLASSES, activation='softmax', name='field_output')(field_branch)
         
-        # Ветвь для предсказания поля
-        field_branch = Dense(64, activation='relu')(lstm2)
-        field_branch = Dropout(0.2)(field_branch)
-        output_field = Dense(self.num_classes, activation='softmax', name='field_output')(field_branch)
-        
-        # Ветвь для предсказания комбинации
-        comb_branch = Dense(256, activation='relu')(lstm2)
-        comb_branch = Dropout(0.3)(comb_branch)
+        # Ветвь для предсказания комбинации (8 чисел)
+        comb_branch = Dense(512, activation='relu')(x)
         comb_output = Dense(8 * NUMBERS_RANGE, activation='softmax')(comb_branch)
         output_comb = Reshape((8, NUMBERS_RANGE), name='comb_output')(comb_output)
 
         model = Model(inputs=input_layer, outputs=[output_field, output_comb])
         
-        optimizer = Adam(learning_rate=0.0005)
+        optimizer = Adam(learning_rate=0.001)
         model.compile(
             optimizer=optimizer,
             loss={
@@ -122,10 +99,6 @@ class LSTMModel:
             metrics={
                 'field_output': 'accuracy',
                 'comb_output': 'accuracy'
-            },
-            loss_weights={
-                'field_output': 0.3,
-                'comb_output': 0.7
             }
         )
         return model
@@ -141,25 +114,14 @@ class LSTMModel:
                 return None
 
             X_normalized = (X_train - 1) / 19.0
-            # Логирование размера данных для проверки SEQUENCE_LENGTH
-            logging.info(f"Форма данных для обучения: {X_normalized.shape}")
-
 
             # Callbacks с явным указанием режима
             callbacks = [
                 EarlyStopping(
                     monitor='val_comb_output_accuracy',
-                    patience=TRAINING_PARAMS['early_stopping_patience'],
+                    patience=20,
                     restore_best_weights=True,
                     mode='max',
-                    verbose=0
-                ),
-                ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=TRAINING_PARAMS['reduce_lr_factor'],
-                    patience=TRAINING_PARAMS['reduce_lr_patience'],
-                    min_lr=TRAINING_PARAMS['min_lr'],  # Исправлено: добавлена запятая
-                    mode='min',
                     verbose=0
                 ),
                 ModelCheckpoint(
@@ -168,8 +130,15 @@ class LSTMModel:
                     save_best_only=True,
                     mode='max',
                     verbose=0
-                )
-            ]
+                ),
+                ReduceLROnPlateau(
+                    monitor='val_loss',
+                    factor=0.5,
+                    patience=10,
+                    mode='min',
+                    verbose=0
+                ),
+        ]
             
             # Обучение модели
             history = self.model.fit(
@@ -178,9 +147,9 @@ class LSTMModel:
                     'field_output': y_field,
                     'comb_output': y_comb
                 },
-                epochs=TRAINING_PARAMS['epochs'],
-                batch_size=TRAINING_PARAMS['batch_size'],
-                validation_split=TRAINING_PARAMS['validation_split'],
+                epochs=epochs,
+                batch_size=batch_size,
+                validation_split=0.2,
                 callbacks=callbacks,
                 verbose=0
             )
@@ -245,37 +214,8 @@ class LSTMModel:
             return False
 
     def _prepare_input(self, X: np.ndarray) -> np.ndarray:
-        """Подготавливает входные данные с учетом SEQUENCE_LENGTH из конфига"""
-        from config import SEQUENCE_LENGTH, NUMBERS_RANGE, COMBINATION_LENGTH
-        
-        # Проверка соответствия размерности
-        if X.ndim != 3 or X.shape[1] != SEQUENCE_LENGTH or X.shape[2] != COMBINATION_LENGTH:
-            raise ValueError(
-                f"Ожидается форма (batch, {SEQUENCE_LENGTH}, {COMBINATION_LENGTH}). Получено: {X.shape}"
-            )
-        
-        # Получаем тренды (если они были установлены при обучении)
-        hot_nums = getattr(self, 'hot_numbers', list(range(1, 6)))
-        cold_nums = getattr(self, 'cold_numbers', list(range(16, 21)))
-        
-        # Инициализируем массив для результатов
-        processed = np.zeros_like(X, dtype=np.float32)
-        
-        # Обрабатываем каждый образец в батче
-        for i in range(X.shape[0]):
-            seq = X[i]
-            
-            # Основная нормализация [1-20] -> [0-1]
-            normalized = (seq - 1) / (NUMBERS_RANGE - 1)
-            
-            # Маски трендов
-            hot_mask = np.isin(seq, hot_nums).astype(np.float32) * 0.2
-            cold_mask = np.isin(seq, cold_nums).astype(np.float32) * (-0.1)
-            
-            # Комбинируем с весами
-            processed[i] = normalized + hot_mask + cold_mask
-        
-        return processed
+        """Подготавливает входные данные"""
+        return ((X - 1) / 19).reshape((X.shape[0], 8, 1))
 
     def _validate_data(self, X: np.ndarray, y: np.ndarray) -> bool:
         """Проверяет корректность данных"""

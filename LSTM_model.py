@@ -13,13 +13,13 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # 0 = все, 3 = ничего
 tf.keras.utils.disable_interactive_logging()  # Отключает прогресс-бары
 from tensorflow.keras.models import load_model # type: ignore
 from tensorflow.keras import Model # type: ignore
-from tensorflow.keras.layers import Conv1D, Input, Reshape, LSTM, Dense, Dropout, BatchNormalization # type: ignore
+from tensorflow.keras.layers import Bidirectional, Conv1D, Input, Reshape, LSTM, Dense, Dropout, BatchNormalization # type: ignore
 from tensorflow.keras.optimizers import Adam # type: ignore
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau # type: ignore
 from tensorflow.keras.regularizers import l2 # type: ignore
 from typing import Dict, List, Tuple, Optional, Any
 import logging
-from config import DATETIME_FORMAT, LOGGING_CONFIG, BATCH_SIZE, MODEL_INPUT_SHAPE, NUM_CLASSES, NUMBERS_RANGE, COMBINATION_LENGTH
+from config import TRAINING_PARAMS, DATETIME_FORMAT, LOGGING_CONFIG, BATCH_SIZE, MODEL_INPUT_SHAPE, NUM_CLASSES, NUMBERS_RANGE, COMBINATION_LENGTH
 
 # Настройка логгера
 logging.basicConfig(**LOGGING_CONFIG)
@@ -46,32 +46,73 @@ class LSTMModel:
         else:
             logger.info("Контекст завершён без ошибок.")
 
+    # def _build_model(self) -> Model:
+    #     """Строит модель LSTM с правильной архитектурой"""
+    #     input_layer = Input(shape=MODEL_INPUT_SHAPE)
+        
+    #     # Основная ветвь обработки
+    #     x = Conv1D(64, kernel_size=8, activation='relu')(input_layer)
+    #     x = BatchNormalization()(x)
+        
+    #     x = LSTM(512, return_sequences=True, kernel_regularizer=l2(0.01))(x)
+    #     x = Dropout(0.4)(x)
+    #     x = LSTM(256, return_sequences=False, kernel_regularizer=l2(0.01))(x)
+    #     x = Dropout(0.3)(x)
+        
+    #     # Ветвь для предсказания поля (1-4)
+    #     field_branch = Dense(128, activation='relu')(x)
+    #     field_branch = Dense(64, activation='relu')(field_branch)
+    #     output_field = Dense(NUM_CLASSES, activation='softmax', name='field_output')(field_branch)
+        
+    #     # Ветвь для предсказания комбинации (8 чисел)
+    #     comb_branch = Dense(512, activation='relu')(x)
+    #     comb_output = Dense(8 * NUMBERS_RANGE, activation='softmax')(comb_branch)
+    #     output_comb = Reshape((8, NUMBERS_RANGE), name='comb_output')(comb_output)
+
+    #     model = Model(inputs=input_layer, outputs=[output_field, output_comb])
+        
+    #     optimizer = Adam(learning_rate=0.001)
+    #     model.compile(
+    #         optimizer=optimizer,
+    #         loss={
+    #             'field_output': 'sparse_categorical_crossentropy',
+    #             'comb_output': 'categorical_crossentropy'
+    #         },
+    #         metrics={
+    #             'field_output': 'accuracy',
+    #             'comb_output': 'accuracy'
+    #         }
+    #     )
+    #     return model
     def _build_model(self) -> Model:
-        """Строит модель LSTM с правильной архитектурой"""
-        input_layer = Input(shape=MODEL_INPUT_SHAPE)
+        input_layer = Input(shape=self.input_shape)
         
-        # Основная ветвь обработки
-        x = Conv1D(64, kernel_size=8, activation='relu')(input_layer)
+        # Улучшенная архитектура
+        x = Conv1D(128, kernel_size=3, activation='relu', padding='same')(input_layer)
         x = BatchNormalization()(x)
+        x = Dropout(0.2)(x)
         
-        x = LSTM(512, return_sequences=True, kernel_regularizer=l2(0.01))(x)
-        x = Dropout(0.4)(x)
-        x = LSTM(256, return_sequences=False, kernel_regularizer=l2(0.01))(x)
-        x = Dropout(0.3)(x)
+        # Двунаправленные LSTM с residual connection
+        lstm1 = Bidirectional(LSTM(256, return_sequences=True))(x)
+        lstm1 = Dropout(0.3)(lstm1)
         
-        # Ветвь для предсказания поля (1-4)
-        field_branch = Dense(128, activation='relu')(x)
-        field_branch = Dense(64, activation='relu')(field_branch)
-        output_field = Dense(NUM_CLASSES, activation='softmax', name='field_output')(field_branch)
+        lstm2 = Bidirectional(LSTM(128))(lstm1)
+        lstm2 = Dropout(0.3)(lstm2)
         
-        # Ветвь для предсказания комбинации (8 чисел)
-        comb_branch = Dense(512, activation='relu')(x)
+        # Ветвь для предсказания поля
+        field_branch = Dense(64, activation='relu')(lstm2)
+        field_branch = Dropout(0.2)(field_branch)
+        output_field = Dense(self.num_classes, activation='softmax', name='field_output')(field_branch)
+        
+        # Ветвь для предсказания комбинации
+        comb_branch = Dense(256, activation='relu')(lstm2)
+        comb_branch = Dropout(0.3)(comb_branch)
         comb_output = Dense(8 * NUMBERS_RANGE, activation='softmax')(comb_branch)
         output_comb = Reshape((8, NUMBERS_RANGE), name='comb_output')(comb_output)
 
         model = Model(inputs=input_layer, outputs=[output_field, output_comb])
         
-        optimizer = Adam(learning_rate=0.001)
+        optimizer = Adam(learning_rate=0.0005)
         model.compile(
             optimizer=optimizer,
             loss={
@@ -81,6 +122,10 @@ class LSTMModel:
             metrics={
                 'field_output': 'accuracy',
                 'comb_output': 'accuracy'
+            },
+            loss_weights={
+                'field_output': 0.3,
+                'comb_output': 0.7
             }
         )
         return model
@@ -96,14 +141,25 @@ class LSTMModel:
                 return None
 
             X_normalized = (X_train - 1) / 19.0
+            # Логирование размера данных для проверки SEQUENCE_LENGTH
+            logging.info(f"Форма данных для обучения: {X_normalized.shape}")
+
 
             # Callbacks с явным указанием режима
             callbacks = [
                 EarlyStopping(
                     monitor='val_comb_output_accuracy',
-                    patience=20,
+                    patience=TRAINING_PARAMS['early_stopping_patience'],
                     restore_best_weights=True,
                     mode='max',
+                    verbose=0
+                ),
+                ReduceLROnPlateau(
+                    monitor='val_loss',
+                    factor=TRAINING_PARAMS['reduce_lr_factor'],
+                    patience=TRAINING_PARAMS['reduce_lr_patience'],
+                    min_lr=TRAINING_PARAMS['min_lr'],  # Исправлено: добавлена запятая
+                    mode='min',
                     verbose=0
                 ),
                 ModelCheckpoint(
@@ -112,15 +168,8 @@ class LSTMModel:
                     save_best_only=True,
                     mode='max',
                     verbose=0
-                ),
-                ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.5,
-                    patience=10,
-                    mode='min',
-                    verbose=0
-                ),
-        ]
+                )
+            ]
             
             # Обучение модели
             history = self.model.fit(
@@ -129,9 +178,9 @@ class LSTMModel:
                     'field_output': y_field,
                     'comb_output': y_comb
                 },
-                epochs=epochs,
-                batch_size=batch_size,
-                validation_split=0.2,
+                epochs=TRAINING_PARAMS['epochs'],
+                batch_size=TRAINING_PARAMS['batch_size'],
+                validation_split=TRAINING_PARAMS['validation_split'],
                 callbacks=callbacks,
                 verbose=0
             )

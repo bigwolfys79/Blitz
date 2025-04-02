@@ -12,7 +12,7 @@ tf.keras.utils.disable_interactive_logging()  # Отключает прогре�
 from typing import List, Tuple, Optional
 import sqlite3
 import logging
-from config import DATETIME_FORMAT,MODEL_SAVE_PATH, SEQUENCE_LENGTH, NUM_CLASSES, SEQUENCE_LENGTH
+from config import TRAINING_PARAMS, DATETIME_FORMAT,MODEL_SAVE_PATH, SEQUENCE_LENGTH, NUM_CLASSES, SEQUENCE_LENGTH
 from database import DatabaseManager
 from collections import defaultdict
 
@@ -551,12 +551,13 @@ class LotteryPredictor:
         """Предсказывает следующий тираж с учетом SEQUENCE_LENGTH"""
         try:
             # 1. Получаем последние SEQUENCE_LENGTH комбинаций
-            last_combinations = self.get_last_combinations(self.sequence_length)
-            if len(last_combinations) < self.sequence_length:
-                raise ValueError(f"Требуется {self.sequence_length} комбинаций, получено {len(last_combinations)}")
+            last_combinations = self.get_last_combinations(SEQUENCE_LENGTH)
+            if len(last_combinations) < SEQUENCE_LENGTH:
+                raise ValueError(f"Требуется {SEQUENCE_LENGTH:} комбинаций, получено {len(last_combinations)}")
 
             # 2. Подготавливаем входные данные (форма: [1, SEQUENCE_LENGTH, COMBINATION_LENGTH])
-            X = np.array([last_combinations], dtype=np.float32)  # Форма: (1, 30, 8)
+            X = np.array([last_combinations[-SEQUENCE_LENGTH:]], dtype=np.float32)  # Обрезка до SEQUENCE_LENGTH
+
             X = (X - 1) / 19  # Нормализация [1-20] -> [0-1]
 
             # 3. Предсказание модели

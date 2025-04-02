@@ -28,15 +28,28 @@ DATABASE_PATH = BASE_DIR / 'results.db'
 # ====================== #
 #  Настройки модели      #
 # ====================== #
-SEQUENCE_LENGTH = 30  # Количество используемых комбинаций
+SEQUENCE_LENGTH = 100  # Количество используемых комбинаций
 NUM_CLASSES = 4       # Для поля 1-4
 COMBINATION_LENGTH = 8  # 8 чисел в комбинации
 NUMBERS_RANGE = 20    # Для чисел 1-20
 BATCH_SIZE = 128
-RETRAIN_HOURS = 0     # Интервал переобучения в часах (0-24)
-NEW_DATA_THRESHOLD = 5  # Минимальное новых записей для обучения
+RETRAIN_HOURS = 3     # Интервал переобучения в часах (0-24)
+NEW_DATA_THRESHOLD = 25  # Минимальное новых записей для обучения
 MODEL_INPUT_SHAPE = (SEQUENCE_LENGTH, COMBINATION_LENGTH)
 MODEL_SAVE_PATH = BASE_DIR / 'models'
+
+# ====================== #
+# Параметры обучения     #
+# ====================== #
+TRAINING_PARAMS = {
+    'epochs': 200,
+    'batch_size': 64,
+    'early_stopping_patience': 25,
+    'reduce_lr_patience': 15,
+    'reduce_lr_factor': 0.5,
+    'min_lr': 1e-6,
+    'validation_split': 0.15
+}
 
 # ====================== #
 #  Настройки отчетов     #

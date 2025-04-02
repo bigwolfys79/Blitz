@@ -245,8 +245,37 @@ class LSTMModel:
             return False
 
     def _prepare_input(self, X: np.ndarray) -> np.ndarray:
-        """Подготавливает входные данные"""
-        return ((X - 1) / 19).reshape((X.shape[0], 8, 1))
+        """Подготавливает входные данные с учетом SEQUENCE_LENGTH из конфига"""
+        from config import SEQUENCE_LENGTH, NUMBERS_RANGE, COMBINATION_LENGTH
+        
+        # Проверка соответствия размерности
+        if X.ndim != 3 or X.shape[1] != SEQUENCE_LENGTH or X.shape[2] != COMBINATION_LENGTH:
+            raise ValueError(
+                f"Ожидается форма (batch, {SEQUENCE_LENGTH}, {COMBINATION_LENGTH}). Получено: {X.shape}"
+            )
+        
+        # Получаем тренды (если они были установлены при обучении)
+        hot_nums = getattr(self, 'hot_numbers', list(range(1, 6)))
+        cold_nums = getattr(self, 'cold_numbers', list(range(16, 21)))
+        
+        # Инициализируем массив для результатов
+        processed = np.zeros_like(X, dtype=np.float32)
+        
+        # Обрабатываем каждый образец в батче
+        for i in range(X.shape[0]):
+            seq = X[i]
+            
+            # Основная нормализация [1-20] -> [0-1]
+            normalized = (seq - 1) / (NUMBERS_RANGE - 1)
+            
+            # Маски трендов
+            hot_mask = np.isin(seq, hot_nums).astype(np.float32) * 0.2
+            cold_mask = np.isin(seq, cold_nums).astype(np.float32) * (-0.1)
+            
+            # Комбинируем с весами
+            processed[i] = normalized + hot_mask + cold_mask
+        
+        return processed
 
     def _validate_data(self, X: np.ndarray, y: np.ndarray) -> bool:
         """Проверяет корректность данных"""

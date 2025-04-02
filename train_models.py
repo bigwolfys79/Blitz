@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from LSTM_model import train_and_save_model
 datetime.now().strftime(DATETIME_FORMAT)
 from database import DatabaseManager
+from typing import Optional, Iterator, List, Tuple, Union, Dict, Any 
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')  # Уровень ERROR и выше
 tf.autograph.set_verbosity(0)  # Отключаем логи AutoGraph
@@ -297,9 +298,9 @@ class ModelTrainChecker:
 
     
     def get_training_model(self, cursor, incremental: bool) -> Optional[dict]:
-        """Подготавливает данные для обучения"""
+        """Подготавливает данные для обучения с расширенными фичами"""
         try:
-            # Убрали LIMIT для получения всех данных
+            # Получаем данные из БД (существующий код)
             cursor.execute("""
                 SELECT combination, field, draw_number 
                 FROM results 
@@ -311,7 +312,7 @@ class ModelTrainChecker:
                 logger.error(f"Недостаточно данных. Нужно минимум {SEQUENCE_LENGTH+1} записей")
                 return None
                 
-            # Подготовка данных
+            # Подготовка данных (существующий код)
             combinations = []
             fields = []
             draw_numbers = []
@@ -323,7 +324,7 @@ class ModelTrainChecker:
                         logger.warning(f"Некорректная комбинация: {row['combination']}")
                         continue
                     combinations.append(comb)
-                    fields.append(row['field'] - 1)  # Поля 0-3
+                    fields.append(row['field'] - 1)
                     draw_numbers.append(row['draw_number'])
                 except ValueError as e:
                     logger.warning(f"Ошибка преобразования комбинации: {row['combination']}. Ошибка: {e}")
@@ -331,7 +332,11 @@ class ModelTrainChecker:
             
             logger.info(f"Получено {len(combinations)} валидных комбинаций. Последний тираж: {draw_numbers[0]}")
             
-            # Формирование последовательностей
+            # Получаем тренды через существующий метод
+            hot_nums, cold_nums = self.analyze_number_trends()
+            logger.debug(f"Горячие числа: {hot_nums}, Холодные числа: {cold_nums}")
+            
+            # Формирование последовательностей с минимальными изменениями
             X = []
             y_field = []
             y_comb = []
@@ -341,7 +346,7 @@ class ModelTrainChecker:
                 target_comb = combinations[i + SEQUENCE_LENGTH]
                 target_field = fields[i + SEQUENCE_LENGTH]
                 
-                # One-hot кодирование комбинации
+                # One-hot кодирование (существующий код)
                 comb_encoded = np.zeros((COMBINATION_LENGTH, NUMBERS_RANGE))
                 for pos, num in enumerate(target_comb):
                     if 1 <= num <= NUMBERS_RANGE:
@@ -349,14 +354,17 @@ class ModelTrainChecker:
                     else:
                         logger.warning(f"Некорректный номер: {num} в комбинации {target_comb}")
                 
-                X.append(seq)
+                # Минимальное добавление фич без изменения структуры X
+                enhanced_seq = self._add_minimal_features(seq, hot_nums, cold_nums)
+                
+                X.append(enhanced_seq)
                 y_field.append(target_field)
                 y_comb.append(comb_encoded)
             
             logger.info(f"Сформировано {len(X)} обучающих последовательностей")
             
             return {
-                'X_train': np.array(X, dtype=np.int32),
+                'X_train': np.array(X, dtype=np.float32),
                 'y_field': np.array(y_field, dtype=np.int32),
                 'y_comb': np.array(y_comb, dtype=np.float32),
                 'last_draw_number': draw_numbers[0] if draw_numbers else None
@@ -365,6 +373,27 @@ class ModelTrainChecker:
         except Exception as e:
             logger.error(f"Ошибка подготовки данных: {str(e)}", exc_info=True)
             return None
+        
+    def _add_minimal_features(self, sequence: List[List[int]], 
+                         hot_nums: List[int], cold_nums: List[int]) -> np.ndarray:
+        """
+        Добавляет минимальный набор новых фич без изменения основной структуры данных.
+        Возвращает массив той же формы (SEQUENCE_LENGTH, COMBINATION_LENGTH), 
+        но с нормализованными значениями.
+        """
+        seq_array = np.array(sequence, dtype=np.float32)
+        
+        # 1. Нормализация основных чисел [1-20] -> [0-1]
+        seq_normalized = (seq_array - 1) / 19.0
+        
+        # 2. Добавляем информацию о горячих/холодных числах через маски
+        hot_mask = np.isin(seq_array, hot_nums).astype(np.float32)
+        cold_mask = np.isin(seq_array, cold_nums).astype(np.float32)
+        
+        # 3. Комбинируем фичи (используем перезапись для сохранения формы)
+        seq_normalized = seq_normalized * 0.8 + hot_mask * 0.1 + cold_mask * 0.1
+        
+        return seq_normalized    
     
     def update_training_info(self, accuracy: float = None, last_draw_number: int = None) -> bool:
         """Обновляет информацию о тренировке модели в таблице model_training_history"""

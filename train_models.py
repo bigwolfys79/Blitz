@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from LSTM_model import train_and_save_model
 datetime.now().strftime(DATETIME_FORMAT)
 from database import DatabaseManager
+from tensorflow.keras.models import load_model # type: ignore
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')  # Уровень ERROR и выше
 tf.autograph.set_verbosity(0)  # Отключаем логи AutoGraph
@@ -219,7 +220,23 @@ class ModelTrainChecker:
    
 
     def _check_should_train(self, cursor) -> Tuple[bool, str]:
-        """Проверяет необходимость обучения модели с улучшенной логикой"""
+        """Проверяет необходимость обучения модели с учетом:
+        1. Совместимости текущей модели с SEQUENCE_LENGTH
+        2. Наличия новых данных
+        3. Интервала переобучения
+        4. Минимального количества данных"""
+        
+        # 1. Проверка совместимости модели
+        model_path = os.path.join('models', 'best_lstm_model.keras')
+        if os.path.exists(model_path):
+            try:
+                model = load_model(model_path)
+                current_seq_length = model.input_shape[1]
+                if current_seq_length != SEQUENCE_LENGTH:
+                    return True, (f"Требуется переобучение: модель обучена на {current_seq_length} "
+                                f"последовательностях, текущий SEQUENCE_LENGTH = {SEQUENCE_LENGTH}")
+            except Exception as e:
+                logger.warning(f"Ошибка проверки модели: {str(e)}. Будет создана новая модель")
         # 1. Проверяем наличие предыдущего обучения
         cursor.execute("""
             SELECT train_time, data_count, last_data_time 

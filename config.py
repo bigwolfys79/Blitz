@@ -28,7 +28,7 @@ DATABASE_PATH = BASE_DIR / 'results.db'
 # ====================== #
 #  Настройки модели      #
 # ====================== #
-SEQUENCE_LENGTH = 30  # Количество используемых комбинаций
+SEQUENCE_LENGTH = 50  # Количество используемых комбинаций
 NUM_CLASSES = 4       # Для поля 1-4
 COMBINATION_LENGTH = 8  # 8 чисел в комбинации
 NUMBERS_RANGE = 20    # Для чисел 1-20

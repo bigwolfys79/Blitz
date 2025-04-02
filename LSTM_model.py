@@ -33,7 +33,25 @@ class LSTMModel:
         os.makedirs(self.model_dir, exist_ok=True)
         self.input_shape = input_shape
         self.num_classes = num_classes
-        self.model = self._build_model()
+        self.model = self._load_or_rebuild_model()
+
+    def _load_or_rebuild_model(self) -> Model:
+        """Загружает модель или пересоздает если она несовместима с текущими параметрами"""
+        model_path = os.path.join(self.model_dir, 'best_lstm_model.keras')
+        
+        if os.path.exists(model_path):
+            try:
+                model = load_model(model_path)
+                # Проверяем совместимость модели
+                if model.input_shape[1] == self.input_shape[0]:
+                    logger.info("Модель загружена и совместима с текущими параметрами")
+                    return model
+                logger.warning(f"Модель несовместима (ожидалось {self.input_shape}, получено {model.input_shape})")
+            except Exception as e:
+                logger.error(f"Ошибка загрузки модели: {str(e)}")
+        
+        logger.info("Создание новой модели с текущими параметрами")
+        return self._build_model()    
 
     def __enter__(self):
         """Действия при входе в блок `with`"""

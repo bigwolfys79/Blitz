@@ -3,7 +3,7 @@ import threading
 import sys
 import time
 import signal
-from config import REPORT_FREQUENCY, REPORT_PERIOD_DAYS
+from config import REPORT_FREQUENCY, REPORT_PERIOD_DAYS, SEQUENCE_LENGTH
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
@@ -12,6 +12,7 @@ from parsing import parse_data
 from LSTM_model import train_and_save_model
 from train_models import ModelTrainChecker
 from database import DatabaseManager
+import tensorflow as tf
 
 class GracefulExit:
     stop = False
@@ -32,7 +33,6 @@ class GracefulExit:
                 logger.warning("Принудительное завершение! (повторное нажатие Ctrl+C)")
                 sys.exit(1)
 
-# Настройка логгера с записью только в файл
 def setup_logging():
     os.makedirs('logs', exist_ok=True)
     
@@ -52,31 +52,47 @@ def setup_logging():
     
     logging.getLogger('tensorflow').propagate = False
 
-# Инициализируем логирование
 setup_logging()
 logger = logging.getLogger(__name__)
 
 MODEL_PATH = os.path.join('models', 'best_lstm_model.keras')
 
-# Регистрируем обработчики сигналов
 signal.signal(signal.SIGINT, GracefulExit.signal_handler)
 signal.signal(signal.SIGTERM, GracefulExit.signal_handler)
 
 class ModelTrainer:
     def __init__(self):
         self.checker = ModelTrainChecker()
+        self.last_seq_length = SEQUENCE_LENGTH
         os.makedirs('models', exist_ok=True)
+
+    def check_model_compatibility(self) -> bool:
+        """Проверяет совместимость модели с текущим SEQUENCE_LENGTH"""
+        if not os.path.exists(MODEL_PATH):
+            return False
+            
+        try:
+            model = tf.keras.models.load_model(MODEL_PATH)
+            model_seq_length = model.input_shape[1]
+            if model_seq_length != SEQUENCE_LENGTH:
+                logger.warning(
+                    f"Несоответствие SEQUENCE_LENGTH! "
+                    f"Модель: {model_seq_length}, конфиг: {SEQUENCE_LENGTH}"
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка проверки модели: {e}")
+            return False
 
     def ensure_model_exists(self) -> bool:
         """Проверяет и создает модель при необходимости."""
+        if os.path.exists(MODEL_PATH) and self.check_model_compatibility():
+            return True
+
         if os.path.exists(MODEL_PATH):
-            try:
-                import tensorflow as tf
-                tf.keras.models.load_model(MODEL_PATH)
-                return True
-            except Exception as e:
-                logger.warning(f"Модель повреждена: {e}. Пересоздаем...")
-                os.remove(MODEL_PATH)
+            logger.warning("Удаление несовместимой модели...")
+            os.remove(MODEL_PATH)
 
         logger.info("Запуск первоначального обучения...")
         return self.run_training_cycle()
@@ -91,7 +107,7 @@ class ModelTrainer:
                         return False
 
                     should_train, reason = self.checker._check_should_train(cursor)
-                    if not should_train:
+                    if not should_train and self.check_model_compatibility():
                         logger.info(f"Обучение не требуется: {reason}")
                         return False
 
@@ -106,12 +122,15 @@ class ModelTrainer:
                     if GracefulExit.should_stop():
                         return False
 
+                    logger.info(f"Начало обучения модели (SEQUENCE_LENGTH={SEQUENCE_LENGTH})")
                     model_result = train_and_save_model(training_data, db.connection)
                     if not model_result.get('success', False):
                         logger.error(f"Ошибка обучения: {model_result.get('message', 'Unknown error')}")
                         return False
 
+                    self.last_seq_length = SEQUENCE_LENGTH
                     db.connection.commit()
+                    logger.info("Модель успешно обучена")
                     return True
                 finally:
                     cursor.close()
@@ -168,6 +187,17 @@ def main():
             cycle_counter += 1
             cycle_start = datetime.now()
             logger.info(f"\n{'-'*83}\nЦикл начат: {cycle_start.strftime('%H:%M:%S')}")
+
+            # Проверка изменения SEQUENCE_LENGTH
+            if SEQUENCE_LENGTH != trainer.last_seq_length:
+                logger.warning(
+                    f"Обнаружено изменение SEQUENCE_LENGTH! "
+                    f"Было: {trainer.last_seq_length}, стало: {SEQUENCE_LENGTH}. "
+                    f"Требуется переобучение модели."
+                )
+                if not trainer.run_training_cycle():
+                    logger.error("Не удалось переобучить модель!")
+                    break
 
             next_run = wait_until_next_interval()
             if GracefulExit.should_stop() or next_run is None:

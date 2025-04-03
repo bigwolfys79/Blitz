@@ -33,16 +33,7 @@ def db_session():
         yield db
     finally:
         db.close()
-# def setup_driver():
-#     service = Service(CHROMEDRIVER_PATH)
-#     options = Options()
-#     options.add_argument('--headless')
-#     options.add_argument('--disable-gpu')
-#     options.add_argument('--no-sandbox')
-#     options.add_argument('--log-level=3')
-#     options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
-#     options.add_experimental_option('excludeSwitches', ['enable-logging'])
-#     return webdriver.Chrome(service=service, options=options)
+
 def setup_driver():
     """Настраивает драйвер с сохранением в папку проекта (для webdriver-manager 4.0+)"""
     try:
@@ -157,8 +148,6 @@ def parse_page(driver, url):
     except Exception as e:
         logging.error(f'Ошибка при парсинге страницы: {e}')
         return []
-
-
 
 import logging
 from datetime import datetime, timedelta

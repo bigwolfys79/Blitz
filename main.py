@@ -177,6 +177,7 @@ def main():
         return
 
     predictor = LotteryPredictor()
+   
     logger.info("Приложение готово к работе")
     logger.info("=" * 50)
 

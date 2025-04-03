@@ -1,6 +1,10 @@
 import os
+import logging
+logger = logging.getLogger(__name__)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import numpy as np
+import random
+import config
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')  # Уровень ERROR и выше
 tf.autograph.set_verbosity(0)  # Отключаем логи AutoGraph
@@ -9,10 +13,9 @@ DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 # Отключаем прогресс-бары и информационные сообщения
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # 0 = все, 3 = ничего
 tf.keras.utils.disable_interactive_logging()  # Отключает прогресс-бары
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import sqlite3
-import logging
-from config import DATETIME_FORMAT,MODEL_SAVE_PATH, SEQUENCE_LENGTH, NUM_CLASSES, SEQUENCE_LENGTH
+from config import PREDICTION_ADJUSTMENT, DATETIME_FORMAT,MODEL_SAVE_PATH, SEQUENCE_LENGTH, NUM_CLASSES, SEQUENCE_LENGTH
 from database import DatabaseManager
 from collections import defaultdict
 
@@ -35,7 +38,7 @@ class PredictionError(Exception):
     pass
 
 class LotteryPredictor:
-    def __init__(self):
+    def __init__(self, skip_initial_check: bool = False):
         self.model_path = os.path.join(MODEL_SAVE_PATH, 'best_lstm_model.keras')
         self.sequence_length = SEQUENCE_LENGTH
         self.num_classes = NUM_CLASSES
@@ -43,6 +46,137 @@ class LotteryPredictor:
         self.combination_length = 8
         self.model_name = "LSTM_v1.0"
         self.model = self._load_model()
+        self.skip_initial_check = skip_initial_check
+        self.adjustment_config = PREDICTION_ADJUSTMENT  # Загружаем конфиг
+
+    def analyze_prediction_effectiveness(self, last_n=20) -> dict:
+        """Анализирует эффективность последних N предсказаний"""
+        analysis = {
+            'total': 0,
+            'correct': 0,
+            'avg_match': 0,
+            'field_accuracy': 0,
+            'common_misses': defaultdict(int),
+            'field_counts': defaultdict(int),
+            'field_accuracy_by_num': defaultdict(float),
+            'number_frequency': defaultdict(int),
+            'success_rate_by_number': defaultdict(float),
+            'numbers': defaultdict(dict)
+        }
+        
+        try:
+            with DatabaseManager() as db:
+                cursor = db.connection.cursor()
+                cursor.execute('''
+                    SELECT predicted_combination, actual_combination, 
+                        predicted_field, actual_field, match_count
+                    FROM predictions 
+                    WHERE actual_combination IS NOT NULL
+                    ORDER BY draw_number DESC 
+                    LIMIT ?
+                ''', (last_n,))
+
+                # Собираем сырые данные
+                field_data = defaultdict(lambda: {'correct': 0, 'total': 0})
+                number_stats = defaultdict(lambda: {'attempts': 0, 'hits': 0, 'miss_count': 0})
+                
+                for row in cursor.fetchall():
+                    analysis['total'] += 1
+                    match_count = row['match_count']
+                    
+                    # Общая статистика
+                    analysis['avg_match'] += match_count
+                    if match_count >= 5:
+                        analysis['correct'] += 1
+                    
+                    # Статистика по полям
+                    pred_field = row['predicted_field']
+                    field_data[pred_field]['total'] += 1
+                    if pred_field == row['actual_field']:
+                        analysis['field_accuracy'] += 1
+                        field_data[pred_field]['correct'] += 1
+                    
+                    # Анализ чисел
+                    if row['actual_combination']:
+                        actual_nums = set(map(int, row['actual_combination'].split(',')))
+                        predicted_nums = set(map(int, row['predicted_combination'].split(',')))
+                        
+                        # Обновляем статистику для каждого числа
+                        for num in predicted_nums:
+                            number_stats[num]['attempts'] += 1
+                            if num in actual_nums:
+                                number_stats[num]['hits'] += 1
+                            else:
+                                number_stats[num]['miss_count'] += 1
+                        
+                        # Частота использования чисел
+                        for num in predicted_nums:
+                            analysis['number_frequency'][num] += 1
+                
+                # Заполняем 'numbers' в analysis
+                for num in number_stats:
+                    attempts = number_stats[num]['attempts']
+                    hits = number_stats[num]['hits']
+                    miss_count = number_stats[num]['miss_count']
+                    success_rate = (hits / attempts * 100) if attempts > 0 else 0
+                    
+                    analysis['numbers'][num] = {
+                        'attempts': attempts,
+                        'success_rate': round(success_rate, 2),
+                        'miss_count': miss_count
+                    }
+                
+                # Расчет производных метрик
+                if analysis['total'] > 0:
+                    analysis['avg_match'] = round(analysis['avg_match'] / analysis['total'], 2)
+                    analysis['correct'] = round(analysis['correct'] / analysis['total'] * 100, 2)
+                    analysis['field_accuracy'] = round(analysis['field_accuracy'] / analysis['total'] * 100, 2)
+                    
+                    # Точность по полям
+                    for field in field_data:
+                        analysis['field_accuracy_by_num'][field] = round(
+                            field_data[field]['correct'] / field_data[field]['total'] * 100, 2
+                        ) if field_data[field]['total'] > 0 else 0
+
+        except Exception as e:
+            logging.error(f"Ошибка анализа эффективности: {e}")
+        
+        return analysis
+
+    def get_previous_prediction_stats(self, last_n=10) -> dict:
+        """Возвращает статистику по последним N предсказаниям"""
+        stats = {
+            'total': 0,
+            'same_combinations': 0,
+            'same_field': 0,
+            'last_combinations': [],
+            'last_fields': []
+        }
+        
+        try:
+            with DatabaseManager() as db:
+                cursor = db.connection.cursor()
+                cursor.execute('''
+                    SELECT predicted_combination, predicted_field 
+                    FROM predictions 
+                    ORDER BY draw_number DESC 
+                    LIMIT ?
+                ''', (last_n,))
+                
+                for row in cursor.fetchall():
+                    stats['total'] += 1
+                    stats['last_combinations'].append(row['predicted_combination'])
+                    stats['last_fields'].append(row['predicted_field'])
+                
+                # Анализ повторяющихся комбинаций
+                if stats['last_combinations']:
+                    stats['same_combinations'] = stats['last_combinations'].count(stats['last_combinations'][0])
+                    stats['same_field'] = stats['last_fields'].count(stats['last_fields'][0])
+                    
+        except Exception as e:
+            logging.error(f"Ошибка получения статистики предсказаний: {e}")
+        
+        return stats    
 
     def get_actual_result(self, draw_number: int) -> Optional[Tuple[str, int]]:
         """Получает реальные результаты для указанного тиража из таблицы results"""
@@ -54,9 +188,7 @@ class LotteryPredictor:
             ''', (draw_number,))
             result = cursor.fetchone()
             return (result['combination'], result['field']) if result else None
-     
- 
-
+    
     def analyze_number_trends(self, last_n_draws=50) -> Tuple[List[int], List[int]]:
         """Анализирует частоту выпадения чисел и возвращает отсортированные по порядку списки"""
         with DatabaseManager() as db:
@@ -123,7 +255,6 @@ class LotteryPredictor:
             ''', (f'-{days} days',))
             total, correct = cursor.fetchone()
             return f"{correct}/{total} ({(correct/total)*100:.2f}%)" if total > 0 else "Нет данных"              
-
    
     def check_last_prediction(self) -> dict:
         """Сравнивает последнее предсказание с фактическими результатами"""
@@ -251,9 +382,7 @@ class LotteryPredictor:
             logging.error(f"Ошибка при проверке предсказания: {e}", exc_info=True)
         
         return result
-        
     
-
     def get_performance_statistics(self, days: int = None) -> dict:
         """Возвращает статистику эффективности предсказаний за указанный период"""
         if days is None:
@@ -348,7 +477,6 @@ class LotteryPredictor:
             logging.error(f"Ошибка получения статистики: {e}", exc_info=True)
         
         return stats
-
       
     def generate_performance_report(self, days: int = None) -> str:
         """Генерирует текстовый отчет об эффективности предсказаний"""
@@ -404,7 +532,6 @@ class LotteryPredictor:
         
         logging.info(report)
         return report
-
 
     def _load_model(self):
         """Загружает предварительно обученную модель Keras"""
@@ -547,76 +674,179 @@ class LotteryPredictor:
             result = cursor.fetchone()  # Теперь fetchone() будет работать
             return result[0] if result else 0
 
-    def predict_next(self) -> Tuple[int, List[int], int]:
-        """Предсказывает следующий тираж с автоматической адаптацией к SEQUENCE_LENGTH"""
-        try:
-            # 1. Получаем ожидаемую длину последовательности из модели
-            expected_seq_length = self.model.input_shape[1]  # Получаем из самой модели
+    def _adjust_prediction(self, predicted_comb: List[int], predicted_field: int) -> Tuple[List[int], int]:
+        """Улучшенная корректировка с интеграцией вашего конфига"""
+        cfg = config.PREDICTION_ADJUSTMENT
+        predicted_comb = [int(num) for num in predicted_comb]
+        
+        # Инициализация трендов только если включено
+        hot_nums, cold_nums = [], []
+        if cfg['USE_TRENDS']:
+            hot_nums, cold_nums = self.analyze_number_trends(last_n_draws=30)
+        
+        effectiveness = self.analyze_prediction_effectiveness(last_n=30)
+        
+        # Определение проблемных чисел
+        bad_numbers = set()
+        for num in range(1, 21):
+            stats = effectiveness['numbers'].get(num, {})
+            success_rate = stats.get('success_rate', 0)
+            miss_count = stats.get('miss_count', 0)
+            attempts = stats.get('attempts', 0)
             
-            # 2. Получаем данные с учетом SEQUENCE_LENGTH из конфига
-            last_combinations = self.get_last_combinations(max(self.sequence_length, expected_seq_length))
+            # Основные критерии
+            if (attempts >= cfg['MIN_ATTEMPTS'] and success_rate < cfg['MIN_SUCCESS_RATE']) or \
+            (miss_count > cfg['MAX_MISSES']):
+                bad_numbers.add(num)
             
-            # 3. Адаптируем данные под требования модели
-            if len(last_combinations) > expected_seq_length:
-                last_combinations = last_combinations[-expected_seq_length:]  # Берем последние N комбинаций
-                logging.info(f"Используются последние {expected_seq_length} комбинаций из {len(last_combinations)} доступных")
-            
-            # 4. Проверка минимального количества данных
-            if len(last_combinations) < expected_seq_length:
-                raise ValueError(
-                    f"Модель требует {expected_seq_length} комбинаций. "
-                    f"Доступно: {len(last_combinations)}. "
-                    f"SEQUENCE_LENGTH в config.py: {self.sequence_length}"
-                )
-
-            # 5. Подготовка входных данных
-            X = np.array([last_combinations], dtype=np.float32)  # Форма: (1, N, 8)
-            X = (X - 1) / 19  # Нормализация [1-20] -> [0-1]
-
-            # 6. Предсказание модели
-            field_probs, comb_probs = self.model.predict(X, verbose=0)
-
-            # 7. Обработка предсказанного поля (1-4)
-            predicted_field = np.argmax(field_probs[0]) + 1
-
-            # 8. Обработка предсказанной комбинации (8 уникальных чисел)
-            predicted_comb = []
-            used_numbers = set()
-            
-            for i in range(8):  # Для каждого из 8 чисел
-                probs = comb_probs[0][i]  # Вероятности для i-го числа
-                sorted_num_indices = np.argsort(probs)[::-1]  # Сортировка по убыванию
+            # Критерий для холодных чисел
+            if cfg['USE_TRENDS'] and num in cold_nums:
+                cold_rank = cold_nums.index(num)
+                if cold_rank < cfg['COLD_RANK_THRESHOLD'] and miss_count > cfg['COLD_RANK_MAX_MISSES']:
+                    bad_numbers.add(num)
+        
+        # Стратегия выбора кандидатов
+        candidates = []
+        if cfg['ADJUSTMENT_STRATEGY'] == 'smart':
+            candidates = [
+                num for num in range(1, 21)
+                if num not in bad_numbers and 
+                effectiveness['numbers'].get(num, {}).get('success_rate', 0) > 40
+            ]
+        elif cfg['ADJUSTMENT_STRATEGY'] == 'hot':
+            candidates = hot_nums[:10]
+        elif cfg['ADJUSTMENT_STRATEGY'] == 'cold':
+            candidates = cold_nums[-10:]
+        else:  # random
+            candidates = [n for n in range(1, 21) if n not in bad_numbers]
+        
+        # Корректировка чисел
+        adjusted_comb = predicted_comb.copy()
+        changes_made = 0
+        
+        for i in range(len(adjusted_comb)):
+            if changes_made >= cfg['NUMBERS_TO_ADJUST']:
+                break
                 
-                for num_idx in sorted_num_indices:
-                    num = num_idx + 1  # Преобразуем индекс 0-19 -> число 1-20
-                    if num not in used_numbers:
-                        predicted_comb.append(num)
-                        used_numbers.add(num)
-                        break
+            if adjusted_comb[i] in bad_numbers or cfg['ADJUSTMENT_STRATEGY'] != 'random':
+                available = [n for n in candidates if n not in adjusted_comb]
+                if available:
+                    adjusted_comb[i] = random.choice(available)
+                    changes_made += 1
+        
+        # Ротация поля
+        last_fields = self.get_previous_prediction_stats(5)['last_fields']
+        if last_fields.count(predicted_field) >= cfg['MAX_REPEATS']:
+            adjusted_field = random.choice([f for f in range(1,5) if f != predicted_field])
+        else:
+            adjusted_field = predicted_field
+        
+        # Логирование
+        logger.info(f"Adjusted {changes_made} numbers using {cfg['ADJUSTMENT_STRATEGY']} strategy")
+        
+        # 6. Логирование с подробной статистикой
+        changes = [f"{old}→{new}" for old, new in zip(predicted_comb, adjusted_comb) if old != new]
+        logger.info(
+            f"\n{' КОРРЕКТИРОВКА ПРЕДСКАЗАНИЯ ':=^50}\n"
+            f"Изменения: {', '.join(changes)}\n"
+            f"Новая комбинация: {sorted(adjusted_comb)}\n"
+            f"Поле: {predicted_field}→{adjusted_field}\n"
+            f"Горячие числа: {hot_nums[:5]}\n"
+            f"Холодные числа: {cold_nums[-3:]}\n"
+            f"Проблемные числа: {sorted(bad_numbers)}\n"
+            f"Точность: {effectiveness['correct']}%\n"
+            f"Среднее совпадений: {effectiveness['avg_match']}\n"
+            f"{'='*50}"
+        )
+        return sorted(adjusted_comb), adjusted_field
 
-            # 9. Получаем номер следующего тиража
-            last_draw_num = self._get_last_draw_number()
-            next_draw_num = last_draw_num + 1 if last_draw_num else 1
+    def predict_next(self) -> Tuple[int, List[int], int]:
+        """Предсказывает следующий тираж с автоматической корректировкой"""
+        try:
+            # Стандартное предсказание
+            next_draw_num, predicted_comb, predicted_field = self._standard_prediction()
+            
+            # Проверяем, нужно ли корректировать
+            pred_stats = self.get_previous_prediction_stats()
 
-            # Логирование параметров
-            logging.info(
-                f"Параметры предсказания: "
-                f"Модель ожидает {expected_seq_length} последовательностей, "
-                f"использовано {len(last_combinations)}. "
-                f"SEQUENCE_LENGTH в конфиге: {self.sequence_length}"
+            # Логируем статистику
+            logger.info(
+                f"Статистика предсказаний: "
+                f"Повторений комбинаций: {pred_stats['same_combinations']}, "
+                f"Повторений поля: {pred_stats['same_field']}"
             )
-
-            return next_draw_num, sorted(predicted_comb), predicted_field
-
+            
+            if (pred_stats['same_combinations'] >= self.adjustment_config['MAX_REPEATS'] or
+                pred_stats['same_field'] >= self.adjustment_config['MAX_REPEATS']):
+                
+                logging.warning(
+                    f"Обнаружено повторение предсказаний: "
+                    f"{pred_stats['same_combinations']} одинаковых комбинаций, "
+                    f"{pred_stats['same_field']} одинаковых полей. "
+                    f"Применяю корректировку."
+                )
+                
+                predicted_comb, predicted_field = self._adjust_prediction(predicted_comb, predicted_field)
+            else:
+                logger.info("Условия для корректировки не выполнены.")
+            return next_draw_num, predicted_comb, predicted_field
+            
         except Exception as e:
-            logging.error(f"Ошибка предсказания: {str(e)}", exc_info=True)
-            raise PredictionError(
-                f"Ошибка предсказания: {str(e)}\n"
-                f"Модель ожидает последовательность длины: {self.model.input_shape[1]}\n"
-                f"Текущий SEQUENCE_LENGTH: {self.sequence_length}"
-            )
- 
+            logging.error(f"Ошибка : {str(e)}", exc_info=True)
+            raise PredictionError(f"Ошибка предсказания: {str(e)}")
 
+    def _standard_prediction(self) -> Tuple[int, List[int], int]:
+        """Стандартное предсказание без модификаций"""
+        # 1. Получаем ожидаемую длину последовательности из модели
+        expected_seq_length = self.model.input_shape[1]
+        
+        # 2. Получаем данные с учетом SEQUENCE_LENGTH из конфига
+        last_combinations = self.get_last_combinations(max(self.sequence_length, expected_seq_length))
+        
+        # 3. Адаптируем данные под требования модели
+        if len(last_combinations) > expected_seq_length:
+            last_combinations = last_combinations[-expected_seq_length:]
+            logging.info(f"Используются последние {expected_seq_length} комбинаций из {len(last_combinations)} доступных")
+        
+        # 4. Проверка минимального количества данных
+        if len(last_combinations) < expected_seq_length:
+            raise ValueError(
+                f"Модель требует {expected_seq_length} комбинаций. "
+                f"Доступно: {len(last_combinations)}. "
+                f"SEQUENCE_LENGTH в config.py: {self.sequence_length}"
+            )
+
+        # 5. Подготовка входных данных
+        X = np.array([last_combinations], dtype=np.float32)
+        X = (X - 1) / 19  # Нормализация [1-20] -> [0-1]
+
+        # 6. Предсказание модели
+        field_probs, comb_probs = self.model.predict(X, verbose=0)
+
+        # 7. Обработка предсказанного поля (1-4)
+        predicted_field = np.argmax(field_probs[0]) + 1
+
+        # 8. Обработка предсказанной комбинации (8 уникальных чисел)
+        predicted_comb = []
+        used_numbers = set()
+        
+        for i in range(8):  # Для каждого из 8 чисел
+            probs = comb_probs[0][i]  # Вероятности для i-го числа
+            sorted_num_indices = np.argsort(probs)[::-1]  # Сортировка по убыванию
+            
+            for num_idx in sorted_num_indices:
+                num = num_idx + 1  # Преобразуем индекс 0-19 -> число 1-20
+                if num not in used_numbers:
+                    predicted_comb.append(num)
+                    used_numbers.add(num)
+                    break
+
+        # 9. Получаем номер следующего тиража
+        last_draw_num = self._get_last_draw_number()
+        next_draw_num = last_draw_num + 1 if last_draw_num else 1
+
+        return next_draw_num, sorted(predicted_comb), predicted_field
+ 
     def predict_and_save(self) -> bool:
         """Выполняет предсказание и сохраняет результат
         
@@ -656,7 +886,6 @@ class LotteryPredictor:
         except Exception as e:
             logging.error(f"Критическая ошибка при сохранении предсказания: {str(e)}", exc_info=True)
             return False
-
 
     def update_actual_results(self, draw_id: int, actual_combination: str, actual_field: int) -> None:
         """Обновляет реальные результаты розыгрыша и проверяет предсказание"""
@@ -698,9 +927,6 @@ class LotteryPredictor:
         except Exception as e:
             logging.error(f"Ошибка при обновлении результатов: {e}", exc_info=True)
             raise
-     
-        
-
 
 def main():
     try:

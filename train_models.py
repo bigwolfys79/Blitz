@@ -89,7 +89,7 @@ class ModelTrainChecker:
                     field INTEGER NOT NULL,
                     draw_number INTEGER NOT NULL,
                     draw_date TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at EXT DEFAULT (datetime('now', 'localtime')),
                     last_update TIMESTAMP,
                     UNIQUE(draw_number)
                 )""", 
@@ -117,7 +117,7 @@ class ModelTrainChecker:
                     comb_accuracy FLOAT,
                     model_type TEXT,
                     base_model_version TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at EXT DEFAULT (datetime('now', 'localtime'))
                 )""",
             
             'model_metadata': """
@@ -150,8 +150,8 @@ class ModelTrainChecker:
                     match_count INTEGER,
                     result_code TEXT,
                     winning_tier TEXT,
-                    checked_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    checked_at EXT DEFAULT (datetime('now', 'localtime')),
+                    created_at EXT DEFAULT (datetime('now', 'localtime')),
                     FOREIGN KEY(draw_number) REFERENCES results(draw_number) ON DELETE CASCADE
                 )"""
         }

@@ -340,6 +340,7 @@ class LotteryPredictor:
 
             # Сохранение результатов
             with DatabaseManager() as db:
+                сhecked_time = datetime.now().strftime(DATETIME_FORMAT)
                 cursor = db.connection.cursor()
                 cursor.execute('''
                     UPDATE predictions SET
@@ -350,7 +351,7 @@ class LotteryPredictor:
                         match_count = ?,
                         result_code = ?,
                         winning_tier = ?,
-                        checked_at = CURRENT_TIMESTAMP
+                        checked_at = ?
                     WHERE draw_number = ?
                 ''', (
                     actual_data[0],
@@ -360,6 +361,7 @@ class LotteryPredictor:
                     result['match_count'],
                     result['result_code'],
                     result['winning_tier'],
+                    сhecked_time,
                     last_draw
                 ))
                 db.connection.commit()
@@ -575,7 +577,7 @@ class LotteryPredictor:
             ''', (draw_number,))
             return cursor.fetchone() is not None
 
-    def save_or_update_prediction(self, draw_number: int, combination: List[int], field: int) -> bool:
+    def save_or_update_prediction(self, draw_number: int, combination: List[int], field: int, strategy: str) -> bool:
         """Сохраняет или обновляет предсказание"""
         try:
             # Логируем начало операции
@@ -627,9 +629,8 @@ class LotteryPredictor:
                         UPDATE predictions 
                         SET predicted_combination = ?,
                             predicted_field = ?,
-                            model_name = ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE draw_number = ?
+                            model_name = ?
+                            WHERE draw_number = ?
                     ''', (comb_str, field, self.model_name, draw_number))
                     logging.info(f"Обновлено предсказание для тиража {draw_number}")
                 else:
@@ -637,9 +638,9 @@ class LotteryPredictor:
                     current_time = datetime.now().strftime(DATETIME_FORMAT)
                     cursor.execute('''
                         INSERT INTO predictions 
-                        (draw_number, predicted_combination, predicted_field, model_name, created_at)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (draw_number, comb_str, field, self.model_name, current_time))
+                        (draw_number, predicted_combination, predicted_field, model_name, created_at, adjustment_strategy)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (draw_number, comb_str, field, self.model_name, current_time, strategy))
                     logging.info(f"Создано предсказание для тиража {draw_number}")
                 
                 db.connection.commit()
@@ -674,53 +675,59 @@ class LotteryPredictor:
             result = cursor.fetchone()  # Теперь fetchone() будет работать
             return result[0] if result else 0
 
-    def _adjust_prediction(self, predicted_comb: List[int], predicted_field: int) -> Tuple[List[int], int]:
-        """Улучшенная корректировка с интеграцией вашего конфига"""
+    def _adjust_prediction(
+    self, 
+    predicted_comb: List[int], 
+    predicted_field: int,
+    strategy: str
+) -> Tuple[List[int], int]:
+        """Корректировка предсказания с учетом стратегии"""
         cfg = config.PREDICTION_ADJUSTMENT
         predicted_comb = [int(num) for num in predicted_comb]
         
-        # Инициализация трендов только если включено
+        # Инициализация переменных по умолчанию
+        bad_numbers = set()
         hot_nums, cold_nums = [], []
-        if cfg['USE_TRENDS']:
-            hot_nums, cold_nums = self.analyze_number_trends(last_n_draws=30)
         
+        # Базовый анализ (выполняется всегда)
         effectiveness = self.analyze_prediction_effectiveness(last_n=30)
         
-        # Определение проблемных чисел
-        bad_numbers = set()
+        # 1. Определение проблемных чисел
         for num in range(1, 21):
             stats = effectiveness['numbers'].get(num, {})
             success_rate = stats.get('success_rate', 0)
             miss_count = stats.get('miss_count', 0)
             attempts = stats.get('attempts', 0)
             
-            # Основные критерии
-            if (attempts >= cfg['MIN_ATTEMPTS'] and success_rate < cfg['MIN_SUCCESS_RATE']) or \
+            if (attempts >= cfg['MIN_ATTEMPTS'] and 
+                success_rate < cfg['MIN_SUCCESS_RATE']) or \
             (miss_count > cfg['MAX_MISSES']):
                 bad_numbers.add(num)
+        
+        # 2. Получение трендов только если нужно
+        if cfg['USE_TRENDS'] or strategy in ['hot', 'cold']:
+            hot_nums, cold_nums = self.analyze_number_trends(last_n_draws=30)
             
-            # Критерий для холодных чисел
-            if cfg['USE_TRENDS'] and num in cold_nums:
-                cold_rank = cold_nums.index(num)
-                if cold_rank < cfg['COLD_RANK_THRESHOLD'] and miss_count > cfg['COLD_RANK_MAX_MISSES']:
+            # Дополнительные критерии для холодных чисел
+            for num in cold_nums:
+                if cold_nums.index(num) < cfg['COLD_RANK_THRESHOLD']:
                     bad_numbers.add(num)
         
-        # Стратегия выбора кандидатов
-        candidates = []
-        if cfg['ADJUSTMENT_STRATEGY'] == 'smart':
+        # 3. Выбор кандидатов в зависимости от стратегии
+        if strategy == 'smart':
             candidates = [
                 num for num in range(1, 21)
                 if num not in bad_numbers and 
                 effectiveness['numbers'].get(num, {}).get('success_rate', 0) > 40
             ]
-        elif cfg['ADJUSTMENT_STRATEGY'] == 'hot':
+        elif strategy == 'hot':
             candidates = hot_nums[:10]
-        elif cfg['ADJUSTMENT_STRATEGY'] == 'cold':
+        elif strategy == 'cold':
             candidates = cold_nums[-10:]
         else:  # random
             candidates = [n for n in range(1, 21) if n not in bad_numbers]
         
-        # Корректировка чисел
+        # Остальная часть метода без изменений
         adjusted_comb = predicted_comb.copy()
         changes_made = 0
         
@@ -728,13 +735,13 @@ class LotteryPredictor:
             if changes_made >= cfg['NUMBERS_TO_ADJUST']:
                 break
                 
-            if adjusted_comb[i] in bad_numbers or cfg['ADJUSTMENT_STRATEGY'] != 'random':
+            if adjusted_comb[i] in bad_numbers or strategy != 'random':
                 available = [n for n in candidates if n not in adjusted_comb]
                 if available:
                     adjusted_comb[i] = random.choice(available)
                     changes_made += 1
         
-        # Ротация поля
+        # Логика для поля остается без изменений
         last_fields = self.get_previous_prediction_stats(5)['last_fields']
         if last_fields.count(predicted_field) >= cfg['MAX_REPEATS']:
             adjusted_field = random.choice([f for f in range(1,5) if f != predicted_field])
@@ -742,7 +749,14 @@ class LotteryPredictor:
             adjusted_field = predicted_field
         
         # Логирование
-        logger.info(f"Adjusted {changes_made} numbers using {cfg['ADJUSTMENT_STRATEGY']} strategy")
+        if changes_made % 10 == 1 and changes_made % 100 != 11:
+            chislo = "число"
+        elif 2 <= changes_made % 10 <= 4 and (changes_made % 100 < 10 or changes_made % 100 >= 20):
+            chislo = "числа"
+        else:
+            chislo = "чисел"
+
+        logger.info(f"Скорректировано {changes_made} {chislo} с использованием стратегии '{strategy}'")
         
         # 6. Логирование с подробной статистикой
         changes = [f"{old}→{new}" for old, new in zip(predicted_comb, adjusted_comb) if old != new]
@@ -761,24 +775,20 @@ class LotteryPredictor:
         return sorted(adjusted_comb), adjusted_field
 
     def predict_next(self) -> Tuple[int, List[int], int]:
-        """Предсказывает следующий тираж с автоматической корректировкой"""
+        """Предсказывает следующий тираж с поддержкой A/B-тестирования стратегий"""
         try:
-            # Стандартное предсказание
+            # 1. Выбор случайной стратегии из доступных
+            strategies = ["smart", "hot", "cold", "random"]
+            chosen_strategy = random.choice(strategies)
+            
+            # 2. Получение базового предсказания
             next_draw_num, predicted_comb, predicted_field = self._standard_prediction()
             
-            # Проверяем, нужно ли корректировать
+            # 3. Проверка условий для корректировки
             pred_stats = self.get_previous_prediction_stats()
-
-            # Логируем статистику
-            logger.info(
-                f"Статистика предсказаний: "
-                f"Повторений комбинаций: {pred_stats['same_combinations']}, "
-                f"Повторений поля: {pred_stats['same_field']}"
-            )
-            
             if (pred_stats['same_combinations'] >= self.adjustment_config['MAX_REPEATS'] or
                 pred_stats['same_field'] >= self.adjustment_config['MAX_REPEATS']):
-                
+
                 logging.warning(
                     f"Обнаружено повторение предсказаний: "
                     f"{pred_stats['same_combinations']} одинаковых комбинаций, "
@@ -786,14 +796,36 @@ class LotteryPredictor:
                     f"Применяю корректировку."
                 )
                 
-                predicted_comb, predicted_field = self._adjust_prediction(predicted_comb, predicted_field)
+                # 4. Применение выбранной стратегии корректировки
+                predicted_comb, predicted_field = self._adjust_prediction(
+                    predicted_comb, 
+                    predicted_field,
+                    strategy=chosen_strategy
+                )
             else:
-                logger.info("Условия для корректировки не выполнены.")
-            return next_draw_num, predicted_comb, predicted_field
+                 logger.info("Условия для корректировки не выполнены.")
+            return next_draw_num, predicted_comb, predicted_field, chosen_strategy
             
         except Exception as e:
-            logging.error(f"Ошибка : {str(e)}", exc_info=True)
-            raise PredictionError(f"Ошибка предсказания: {str(e)}")
+            logging.error(f"Ошибка в процессе предсказания: {str(e)}", exc_info=True)
+            raise PredictionError(f"Сбой предсказания: {str(e)}")
+        
+    def get_strategy_performance(self, days: int = 30) -> dict:
+        """Возвращает статистику эффективности стратегий"""
+        with DatabaseManager() as db:
+            cursor = db.connection.cursor()
+            cursor.execute('''
+                SELECT 
+                    adjustment_strategy,
+                    COUNT(*) as total,
+                    AVG(match_count) as avg_matches,
+                    SUM(CASE WHEN match_count >= 5 THEN 1 ELSE 0 END)*100.0/COUNT(*) as win_rate
+                FROM predictions
+                WHERE date(created_at) >= date('now', '-' || ? || ' days')
+                GROUP BY adjustment_strategy
+            ''', (days,))
+            
+            return {row['adjustment_strategy']: dict(row) for row in cursor.fetchall()}    
 
     def _standard_prediction(self) -> Tuple[int, List[int], int]:
         """Стандартное предсказание без модификаций"""
@@ -855,7 +887,7 @@ class LotteryPredictor:
         """
         try:
             # Получаем предсказание
-            next_draw, comb, field = self.predict_next()
+            next_draw, comb, field, strategy = self.predict_next()
 
             # Дополнительная проверка поля
             if field < 1 or field > 4:
@@ -874,7 +906,7 @@ class LotteryPredictor:
             logging.info(border + "\n")
             
             # Сохраняем предсказание в транзакции
-            success = self.save_or_update_prediction(next_draw, comb, field)
+            success = self.save_or_update_prediction(next_draw, comb, field, strategy)
             
             if not success:
                 logging.warning("Не удалось сохранить предсказание в БД")
@@ -892,21 +924,22 @@ class LotteryPredictor:
         try:
             with DatabaseManager() as db:
                 cursor = db.connection.cursor()
-                
+                checked_time = datetime.now().strftime(DATETIME_FORMAT)
                 # Обновляем запись и сразу проверяем совпадение
                 cursor.execute('''
                     UPDATE predictions 
                     SET actual_combination = ?,
                         actual_field = ?,
                         is_correct = (predicted_combination = ? AND predicted_field = ?),
-                        checked_at = CURRENT_TIMESTAMP
+                        checked_at = ?
                     WHERE draw_number = ?
                 ''', (
                     actual_combination,
                     actual_field,
                     actual_combination,
                     actual_field,
-                    draw_id
+                    checked_time,
+                    draw_id                    
                 ))
                 
                 db.connection.commit()

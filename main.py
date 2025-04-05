@@ -230,6 +230,19 @@ def main():
             if cycle_counter % REPORT_FREQUENCY == 0:
                 try:
                     report = predictor.generate_performance_report(REPORT_PERIOD_DAYS)
+                    # После запуска предсказаний в течение нескольких дней
+                    # stats = predictor.get_strategy_performance(60)
+
+                    # print("{:<10} {:<10} {:<10} {:<10}".format(
+                    #     "Стратегия", "Прогнозов", "Ср. совпад.", "Выигрыши %"
+                    # ))
+                    # for strategy, data in stats.items():
+                    #     print("{:<10} {:<10} {:<10.2f} {:<10.2f}".format(
+                    #         strategy, 
+                    #         data['total'], 
+                    #         data['avg_matches'], 
+                    #         data['win_rate']
+                    #     ))
                 except Exception as e:
                     logger.error(f"Ошибка генерации отчета: {e}")
 
